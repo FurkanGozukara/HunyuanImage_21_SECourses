@@ -255,15 +255,12 @@ def load_pipeline(use_distilled: bool = False,
                  device: str = "cuda",
                  enable_dit_offloading: bool = True,
                  enable_reprompt_offloading: bool = True,
-                 enable_refiner_offloading: bool = True,
-                 load_reprompt_model: bool = False):
+                 enable_refiner_offloading: bool = True):
     """Load the HunyuanImage pipeline with configurable offloading."""
     try:
         print(f"Loading HunyuanImage pipeline (distilled={use_distilled})...")
         print(f"  DiT offloading: {enable_dit_offloading}")
-        print(f"  Reprompt model: {'Enabled' if load_reprompt_model else 'Disabled'}")
-        if load_reprompt_model:
-            print(f"  Reprompt offloading: {enable_reprompt_offloading}")
+        print(f"  Reprompt offloading: {enable_reprompt_offloading}")
         print(f"  Refiner offloading: {enable_refiner_offloading}")
         
         # Set model root to our models directory
@@ -279,13 +276,10 @@ def load_pipeline(use_distilled: bool = False,
         )
         pipeline.to('cpu')
         
-        # Store whether reprompt model should be available
-        pipeline._should_load_reprompt = load_reprompt_model
+        # Don't set reprompt flag here - it will be set dynamically
         
-        # Setup refiner pipeline
-        refiner_pipeline = pipeline.refiner_pipeline
-        refiner_pipeline.text_encoder = pipeline.text_encoder
-        refiner_pipeline.to('cpu')
+        # Don't setup refiner here - it will be loaded on demand when needed
+        # This saves memory if refiner is never used
         
         print("✓ Pipeline loaded successfully")
         return pipeline
@@ -301,9 +295,9 @@ current_model_type = None
 current_offloading_settings = {
     'dit': True,
     'reprompt': True,
-    'refiner': True,
-    'load_reprompt': False
+    'refiner': True
 }
+current_reprompt_loaded = False
 
 
 class HunyuanImageApp:
@@ -329,34 +323,20 @@ class HunyuanImageApp:
                     enable_reprompt_offloading: bool, enable_refiner_offloading: bool,
                     use_reprompt: bool, auto_enhance: bool) -> str:
         """Switch between models and update offloading settings."""
-        global pipeline, current_model_type, current_offloading_settings
+        global pipeline, current_model_type, current_offloading_settings, current_reprompt_loaded
         
         try:
             use_distilled = (model_type == "distilled")
             
-            # Check if we need to reload due to model or offloading changes
-            offloading_changed = (
-                current_offloading_settings['dit'] != enable_dit_offloading or
-                current_offloading_settings['reprompt'] != enable_reprompt_offloading or
-                current_offloading_settings['refiner'] != enable_refiner_offloading or
-                current_offloading_settings.get('load_reprompt', False) != use_reprompt
-            )
+            # Only check for DiT offloading changes that require pipeline reload
+            # Reprompt and Refiner changes do NOT require pipeline reload
+            dit_offloading_changed = current_offloading_settings['dit'] != enable_dit_offloading
             
-            # Special check: if reprompt is requested but not actually loaded in the pipeline
-            reprompt_mismatch = False
-            if pipeline is not None:
-                has_reprompt = hasattr(pipeline, '_should_load_reprompt') and pipeline._should_load_reprompt
-                # Check if reprompt or auto_enhance is enabled but model not loaded
-                reprompt_mismatch = ((use_reprompt or auto_enhance) and not has_reprompt)
-            
-            if current_model_type != model_type or offloading_changed or reprompt_mismatch:
+            # Check if we need to reload the entire pipeline (only for model type or DiT offloading)
+            if current_model_type != model_type or dit_offloading_changed:
                 print(f"Reloading pipeline with new settings...")
                 print(f"  Model: {model_type}")
                 print(f"  DiT offloading: {enable_dit_offloading}")
-                print(f"  Reprompt model: {'Enabled' if (use_reprompt or auto_enhance) else 'Disabled'}")
-                if (use_reprompt or auto_enhance):
-                    print(f"  Reprompt offloading: {enable_reprompt_offloading}")
-                print(f"  Refiner offloading: {enable_refiner_offloading}")
                 
                 # Clear GPU memory
                 if pipeline is not None:
@@ -369,21 +349,31 @@ class HunyuanImageApp:
                     device=self.device,
                     enable_dit_offloading=enable_dit_offloading,
                     enable_reprompt_offloading=enable_reprompt_offloading,
-                    enable_refiner_offloading=enable_refiner_offloading,
-                    load_reprompt_model=(use_reprompt or auto_enhance)
+                    enable_refiner_offloading=enable_refiner_offloading
                 )
                 self.pipeline = pipeline
                 current_model_type = model_type
                 current_offloading_settings = {
                     'dit': enable_dit_offloading,
                     'reprompt': enable_reprompt_offloading,
-                    'refiner': enable_refiner_offloading,
-                    'load_reprompt': (use_reprompt or auto_enhance)
+                    'refiner': enable_refiner_offloading
                 }
+                current_reprompt_loaded = False  # Reset reprompt state after pipeline reload
                 
                 return f"Pipeline reloaded with updated settings"
             else:
-                return f"No changes needed - already using these settings"
+                # Pipeline doesn't need reload, just update offloading settings if needed
+                if current_offloading_settings['reprompt'] != enable_reprompt_offloading:
+                    current_offloading_settings['reprompt'] = enable_reprompt_offloading
+                    if pipeline is not None:
+                        pipeline.enable_reprompt_model_offloading = enable_reprompt_offloading
+                        
+                if current_offloading_settings['refiner'] != enable_refiner_offloading:
+                    current_offloading_settings['refiner'] = enable_refiner_offloading
+                    if pipeline is not None:
+                        pipeline.enable_refiner_offloading = enable_refiner_offloading
+                        
+                return f"Settings updated without pipeline reload"
                 
         except Exception as e:
             return f"Error updating pipeline: {str(e)}"
@@ -392,7 +382,7 @@ class HunyuanImageApp:
                              enable_reprompt_offloading: bool, enable_refiner_offloading: bool,
                              use_reprompt: bool, auto_enhance: bool = False):
         """Ensure pipeline is loaded with the correct settings."""
-        global pipeline, current_model_type, current_offloading_settings
+        global pipeline, current_model_type, current_offloading_settings, current_reprompt_loaded
         
         if pipeline is None:
             # First time loading - use the provided settings
@@ -403,18 +393,35 @@ class HunyuanImageApp:
                 device=self.device,
                 enable_dit_offloading=enable_dit_offloading,
                 enable_reprompt_offloading=enable_reprompt_offloading,
-                enable_refiner_offloading=enable_refiner_offloading,
-                load_reprompt_model=(use_reprompt or auto_enhance)
+                enable_refiner_offloading=enable_refiner_offloading
             )
             self.pipeline = pipeline
             current_model_type = model_type
             current_offloading_settings = {
                 'dit': enable_dit_offloading,
                 'reprompt': enable_reprompt_offloading,
-                'refiner': enable_refiner_offloading,
-                'load_reprompt': (use_reprompt or auto_enhance)
+                'refiner': enable_refiner_offloading
             }
+            current_reprompt_loaded = False
             print(f"✓ Pipeline loaded with user settings")
+        
+        # Handle reprompt model loading separately (doesn't require pipeline reload)
+        self._ensure_reprompt_loaded(use_reprompt or auto_enhance)
+    
+    def _ensure_reprompt_loaded(self, should_load: bool):
+        """Ensure reprompt model is loaded if needed, without reloading pipeline."""
+        global current_reprompt_loaded
+        
+        if self.pipeline is None:
+            return
+        
+        # Set the flag indicating whether reprompt should be available
+        self.pipeline._should_load_reprompt = should_load
+        current_reprompt_loaded = should_load
+        
+        if should_load and not hasattr(self.pipeline, '_reprompt_model'):
+            print("Loading reprompt model on demand...")
+            # The model will be loaded lazily when first accessed
     
     def generate_single_image(self, 
                             prompt: str,
@@ -438,6 +445,9 @@ class HunyuanImageApp:
         enhanced_prompt = prompt
         actual_use_reprompt = use_reprompt
         final_prompt_for_return = prompt  # Track what prompt to return to UI
+        
+        # Ensure reprompt is loaded if needed
+        self._ensure_reprompt_loaded(auto_enhance)
         
         # Check if reprompt model is available
         has_reprompt = hasattr(self.pipeline, '_should_load_reprompt') and self.pipeline._should_load_reprompt
@@ -491,6 +501,7 @@ class HunyuanImageApp:
         pre_refiner_image = None
         
         if use_refiner:
+            # Refiner is loaded on-demand via the property accessor
             # Generate base image first without refiner
             base_image = self.pipeline(
                 prompt=enhanced_prompt if auto_enhance else prompt,
@@ -506,8 +517,9 @@ class HunyuanImageApp:
             )
             pre_refiner_image = base_image
             
-            # Apply refiner
+            # Apply refiner (loaded on-demand via property)
             self.pipeline.to('cpu')
+            # Accessing refiner_pipeline property will load it if not already loaded
             self.pipeline.refiner_pipeline.to('cuda')
             
             final_image = self.pipeline.refiner_pipeline(
