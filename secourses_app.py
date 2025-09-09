@@ -436,17 +436,21 @@ class HunyuanImageApp:
         # Auto enhance prompt if requested
         enhanced_prompt = prompt
         actual_use_reprompt = use_reprompt
+        final_prompt_for_return = prompt  # Track what prompt to return to UI
         
         # Check if reprompt model is available
         has_reprompt = hasattr(self.pipeline, '_should_load_reprompt') and self.pipeline._should_load_reprompt
         
-        if auto_enhance and use_reprompt and has_reprompt:
+        # Handle prompt enhancement - ONLY if auto_enhance is True
+        if has_reprompt and auto_enhance:
+            # Auto enhance is enabled, enhance the prompt
             self.pipeline.to('cpu')
             if hasattr(self.pipeline, '_refiner_pipeline'):
                 self.pipeline.refiner_pipeline.to('cpu')
             enhanced_prompt = self.pipeline.reprompt_model.predict(prompt)
-        elif (auto_enhance or use_reprompt) and not has_reprompt:
-            print("Warning: Reprompt requested but model not loaded. Using original prompt.")
+            final_prompt_for_return = enhanced_prompt
+        elif auto_enhance and not has_reprompt:
+            print("Warning: Auto enhance requested but reprompt model not loaded. Using original prompt.")
             actual_use_reprompt = False
         
         # Move pipeline to GPU
@@ -495,7 +499,7 @@ class HunyuanImageApp:
                 guidance_scale=guidance_scale,
                 shift=main_shift,
                 seed=seed,
-                use_reprompt=actual_use_reprompt and not auto_enhance and has_reprompt,  # Don't double-enhance
+                use_reprompt=False,  # Never use pipeline's internal enhancement
                 use_refiner=False
             )
             pre_refiner_image = base_image
@@ -525,16 +529,16 @@ class HunyuanImageApp:
                 guidance_scale=guidance_scale,
                 shift=main_shift,
                 seed=seed,
-                use_reprompt=actual_use_reprompt and not auto_enhance and has_reprompt,
+                use_reprompt=False,  # Never use pipeline's internal enhancement
                 use_refiner=False
             )
         
         self.print_peak_memory()
         
         # Return the final prompt that was actually used
-        final_used_prompt = enhanced_prompt if (auto_enhance and has_reprompt) else prompt
+        # This includes prompts enhanced by either auto_enhance or use_reprompt
         
-        return final_image, pre_refiner_image, metadata, final_used_prompt
+        return final_image, pre_refiner_image, metadata, final_prompt_for_return
 
     def generate_images(self,
                        model_type: str,
@@ -676,7 +680,7 @@ class HunyuanImageApp:
             has_reprompt = hasattr(self.pipeline, '_should_load_reprompt') and self.pipeline._should_load_reprompt
             
             if not has_reprompt:
-                return prompt, "Reprompt model not loaded. Enable 'Use Reprompt Model' or 'Auto Enhance Prompt' first."
+                return prompt, "Reprompt model not loaded. Enable 'Load Reprompt Model' first."
             
             self.pipeline.to('cpu')
             if hasattr(self.pipeline, '_refiner_pipeline'):
@@ -953,43 +957,45 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                         with gr.Accordion("ℹ️ Understanding Reprompt Options", open=False):
                             gr.Markdown(
                                 """
-                                **Use Reprompt Model vs Auto Enhance Prompt:**
+                                **Load Reprompt Model vs Auto Enhance Prompt:**
                                 
-                                **Use Reprompt Model** (checkbox below):
+                                **Load Reprompt Model** (checkbox below):
                                 - Controls whether the reprompt LLM model is loaded into memory
+                                - Just loading it does NOT automatically enhance prompts
                                 - Must be enabled to use ANY prompt enhancement features
                                 - Adds ~7GB VRAM requirement when enabled
                                 - If disabled, no prompt enhancement is possible
                                 
                                 **Auto Enhance Prompt** (checkbox below):
-                                - Only works if "Use Reprompt Model" is enabled
+                                - Only works if "Load Reprompt Model" is enabled
+                                - This is what actually triggers automatic enhancement
                                 - When checked: Automatically enhances your prompt before every generation
                                 - When unchecked: Uses your original prompt as-is
                                 - Enhanced prompt will be shown in the prompt box after generation
                                 
                                 **Manual Enhancement** (in Prompt Enhancement tab):
-                                - Requires "Use Reprompt Model" to be enabled
+                                - Requires "Load Reprompt Model" to be enabled
+                                - Works independently of "Auto Enhance Prompt"
                                 - Lets you enhance prompts manually and see results before using them
                                 - Good for testing and fine-tuning prompts
                                 
-                                **Example Workflow:**
-                                1. Enable "Use Reprompt Model" to load the enhancement model
-                                2. Either:
-                                   - Enable "Auto Enhance" for automatic enhancement on every generation
-                                   - OR use the Prompt Enhancement tab to manually enhance and review
+                                **Example Workflows:**
+                                1. **No enhancement**: Both checkboxes unchecked
+                                2. **Manual only**: Enable "Load Reprompt Model", use Enhancement tab
+                                3. **Auto enhancement**: Enable both "Load Reprompt Model" AND "Auto Enhance Prompt"
                                 """
                             )
                         
                         with gr.Row():
                             use_reprompt = gr.Checkbox(
-                                label="Use Reprompt Model",
+                                label="Load Reprompt Model",
                                 value=last_config.get('use_reprompt', False) if last_config else False,
-                                info="Load the reprompt LLM model into memory (required for any prompt enhancement, +7GB VRAM)"
+                                info="Load the reprompt LLM model into memory (required for enhancement features, +7GB VRAM, doesn't auto-enhance)"
                             )
                             auto_enhance = gr.Checkbox(
                                 label="Auto Enhance Prompt",
                                 value=last_config.get('auto_enhance', False) if last_config else False,
-                                info="Automatically enhance every prompt before generation (requires 'Use Reprompt Model' to be enabled)"
+                                info="Automatically enhance every prompt before generation (requires 'Load Reprompt Model' to be enabled)"
                             )
                         
                         with gr.Row():
@@ -1067,10 +1073,11 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                         gr.Markdown("### Manual Prompt Enhancement")
                         gr.Markdown(
                             """
-                            **Note:** This tab requires "Use Reprompt Model" to be enabled in the Text-to-Image tab.
+                            **Note:** This tab requires "Load Reprompt Model" to be enabled in the Text-to-Image tab.
                             
                             Use this to manually enhance prompts and review them before generation.
                             The enhanced prompt can be copied and used in the main generation tab.
+                            This works independently of "Auto Enhance Prompt".
                             """
                         )
                         
@@ -1092,7 +1099,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                         enhancement_status = gr.Textbox(
                             label="Status",
                             interactive=False,
-                            value="Ready to enhance (requires 'Use Reprompt Model' to be enabled)"
+                            value="Ready to enhance (requires 'Load Reprompt Model' to be enabled)"
                         )
         
         # Event handlers
@@ -1204,14 +1211,14 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
             - **Config Management**: Save and load your favorite settings
             - **Smart Prompt Enhancement**: 
               - Optional reprompt model loading (saves 7GB VRAM when disabled)
-              - Auto-enhance mode for automatic prompt improvement
+              - Separate control: Load model vs Auto-enhance
               - Manual enhancement tab for testing and refinement
             - **Pre-refiner Images**: Saves both refined and pre-refined versions
             - **GPU Memory Optimization**: Configurable model offloading to reduce VRAM usage
             
             ### 💡 Quick Tips
-            - **Low VRAM?** Keep "Use Reprompt Model" disabled to save 7GB
-            - **Want better prompts?** Enable "Use Reprompt Model" first, then choose auto or manual enhancement
+            - **Low VRAM?** Keep "Load Reprompt Model" disabled to save 7GB
+            - **Want better prompts?** Enable "Load Reprompt Model" first, then enable "Auto Enhance" or use manual tab
             - **Testing prompts?** Use the Prompt Enhancement tab to preview enhanced versions
             """,
             elem_classes="model-info"
