@@ -1,35 +1,16 @@
 import os
-IS_SPACE = True
-
-if IS_SPACE:
-    import spaces
-
-
 import sys
 import warnings
 import subprocess
+import json
+import platform
+import webbrowser
 from pathlib import Path
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, List
+from datetime import datetime
+import argparse
+import random
 import torch
-
-def space_context(duration: int):
-    if IS_SPACE:
-        return spaces.GPU(duration=duration)
-    return lambda x: x
-
-@space_context(duration=120)
-def test_env():
-    assert torch.cuda.is_available()
-
-    try:
-        import flash_attn
-    except ImportError:
-        print("Flash-attn not found, installing...")
-        os.system("pip install flash-attn==2.7.3 --no-build-isolation")
-
-    else:
-        print("Flash-attn found, skipping installation...")
-test_env()
 
 warnings.filterwarnings("ignore")
 
@@ -49,17 +30,133 @@ except ImportError as e:
     sys.exit(1)
 
 
-BASE_DIR = os.environ.get('HUNYUANIMAGE_V2_1_MODEL_ROOT', './ckpts')
+# Configuration
+BASE_DIR = Path('./models')
+OUTPUTS_DIR = Path('./outputs')
+CONFIGS_DIR = Path('./configs')
+LAST_CONFIG_FILE = CONFIGS_DIR / '_last_config.json'
+
+# Create necessary directories
+BASE_DIR.mkdir(exist_ok=True)
+OUTPUTS_DIR.mkdir(exist_ok=True)
+CONFIGS_DIR.mkdir(exist_ok=True)
+
+
+class ImageSaver:
+    """Handles saving images with unique names and metadata."""
+    
+    def __init__(self, output_dir: Path = OUTPUTS_DIR):
+        self.output_dir = output_dir
+        self.output_dir.mkdir(exist_ok=True)
+        
+    def get_next_filename(self) -> Tuple[str, str]:
+        """Get next available filename with format 0001.png."""
+        existing_files = list(self.output_dir.glob('*.png'))
+        existing_numbers = []
+        
+        for file in existing_files:
+            try:
+                # Extract number from filename like 0001.png or 0001_pre_refiner.png
+                base_name = file.stem.split('_')[0]
+                existing_numbers.append(int(base_name))
+            except (ValueError, IndexError):
+                continue
+                
+        next_number = max(existing_numbers, default=0) + 1
+        filename = f"{next_number:04d}.png"
+        return filename, f"{next_number:04d}"
+        
+    def save_image(self, image: Image.Image, metadata: Dict, is_pre_refiner: bool = False) -> str:
+        """Save image with metadata."""
+        base_name, number = self.get_next_filename()
+        
+        if is_pre_refiner:
+            filename = f"{number}_pre_refiner.png"
+        else:
+            filename = base_name
+            
+        filepath = self.output_dir / filename
+        
+        # Save image
+        image.save(filepath)
+        
+        # Save metadata
+        metadata_path = filepath.with_suffix('.txt')
+        metadata['timestamp'] = datetime.now().isoformat()
+        metadata['filename'] = filename
+        
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+            
+        return str(filepath)
+
+
+class ConfigManager:
+    """Manages saving and loading configurations."""
+    
+    def __init__(self, configs_dir: Path = CONFIGS_DIR):
+        self.configs_dir = configs_dir
+        self.configs_dir.mkdir(exist_ok=True)
+        
+    def save_config(self, config_name: str, params: Dict) -> bool:
+        """Save configuration to file."""
+        try:
+            config_path = self.configs_dir / f"{config_name}.json"
+            with open(config_path, 'w') as f:
+                json.dump(params, f, indent=2)
+            
+            # Save as last used config
+            with open(LAST_CONFIG_FILE, 'w') as f:
+                json.dump(params, f, indent=2)
+            return True
+        except Exception as e:
+            print(f"Error saving config: {e}")
+            return False
+            
+    def load_config(self, config_name: str) -> Optional[Dict]:
+        """Load configuration from file."""
+        try:
+            config_path = self.configs_dir / f"{config_name}.json"
+            if config_path.exists():
+                with open(config_path, 'r') as f:
+                    params = json.load(f)
+                    
+                # Save as last used config
+                with open(LAST_CONFIG_FILE, 'w') as f:
+                    json.dump(params, f, indent=2)
+                return params
+        except Exception as e:
+            print(f"Error loading config: {e}")
+        return None
+        
+    def load_last_config(self) -> Optional[Dict]:
+        """Load last used configuration."""
+        try:
+            if LAST_CONFIG_FILE.exists():
+                with open(LAST_CONFIG_FILE, 'r') as f:
+                    return json.load(f)
+        except Exception as e:
+            print(f"Error loading last config: {e}")
+        return None
+        
+    def list_configs(self) -> List[str]:
+        """List available configurations."""
+        configs = []
+        for config_file in self.configs_dir.glob('*.json'):
+            if not config_file.name.startswith('_'):
+                configs.append(config_file.stem)
+        return sorted(configs)
+
 
 class CheckpointDownloader:
     """Handles downloading of all required checkpoints for HunyuanImage."""
     
-    def __init__(self, base_dir: str = BASE_DIR):
-        self.base_dir = Path(base_dir)
+    def __init__(self, base_dir: Path = BASE_DIR):
+        self.base_dir = base_dir
         self.base_dir.mkdir(exist_ok=True)
         print(f'Downloading checkpoints to: {self.base_dir}')
         
-        # Define all required checkpoints
+        # Define all required checkpoints with corrected paths
         self.checkpoints = {
             "main_model": {
                 "repo_id": "tencent/HunyuanImage-2.1",
@@ -91,10 +188,8 @@ class CheckpointDownloader:
         
         try:
             if config.get("use_modelscope", False):
-                # Use modelscope for Chinese models
                 return self._download_with_modelscope(config, progress_callback)
             else:
-                # Use huggingface_hub for other models
                 return self._download_with_hf(config, progress_callback)
         except Exception as e:
             return False, f"Download failed: {str(e)}"
@@ -128,7 +223,6 @@ class CheckpointDownloader:
         print(f"Downloading {repo_id} via ModelScope...")
         
         try:
-            # Use subprocess to call modelscope CLI
             cmd = [
                 "modelscope", "download", 
                 "--model", repo_id,
@@ -157,27 +251,36 @@ class CheckpointDownloader:
         return True, "All checkpoints downloaded successfully", results
 
 
-@space_context(duration=2000)
-def load_pipeline(use_distilled: bool = False, device: str = "cuda"):
-    """Load the HunyuanImage pipeline (only load once, refiner and reprompt are accessed from it)."""
+def load_pipeline(use_distilled: bool = False, 
+                 device: str = "cuda",
+                 enable_dit_offloading: bool = True,
+                 enable_reprompt_offloading: bool = True,
+                 enable_refiner_offloading: bool = True):
+    """Load the HunyuanImage pipeline with configurable offloading."""
     try:
-        assert not use_distilled # use_distilled is a placeholder for the future
-
         print(f"Loading HunyuanImage pipeline (distilled={use_distilled})...")
+        print(f"  DiT offloading: {enable_dit_offloading}")
+        print(f"  Reprompt offloading: {enable_reprompt_offloading}")
+        print(f"  Refiner offloading: {enable_refiner_offloading}")
+        
+        # Set model root to our models directory
+        os.environ['HUNYUANIMAGE_V2_1_MODEL_ROOT'] = str(BASE_DIR)
+        
         model_name = "hunyuanimage-v2.1-distilled" if use_distilled else "hunyuanimage-v2.1"
         pipeline = HunyuanImagePipeline.from_pretrained(
             model_name=model_name,
             device=device,
-            enable_dit_offloading=True,
-            enable_reprompt_model_offloading=True,
-            enable_refiner_offloading=True
+            enable_dit_offloading=enable_dit_offloading,
+            enable_reprompt_model_offloading=enable_reprompt_offloading,
+            enable_refiner_offloading=enable_refiner_offloading
         )
         pipeline.to('cpu')
+        
+        # Setup refiner pipeline
         refiner_pipeline = pipeline.refiner_pipeline
         refiner_pipeline.text_encoder = pipeline.text_encoder
         refiner_pipeline.to('cpu')
-        reprompt_model = pipeline.reprompt_model
-
+        
         print("✓ Pipeline loaded successfully")
         return pipeline
     except Exception as e:
@@ -186,84 +289,270 @@ def load_pipeline(use_distilled: bool = False, device: str = "cuda"):
         raise
 
 
-# if IS_SPACE:
-#     downloader = CheckpointDownloader()
-#     downloader.download_all_checkpoints()
+# Global pipeline variable - will be loaded on demand
+pipeline = None
+current_model_type = None
+current_offloading_settings = {
+    'dit': True,
+    'reprompt': True,
+    'refiner': True
+}
 
-pipeline = load_pipeline(use_distilled=False, device="cuda")
+
 class HunyuanImageApp:
-
-    @space_context(duration=290)
     def __init__(self, auto_load: bool = True, use_distilled: bool = False, device: str = "cuda"):
         """Initialize the HunyuanImage Gradio app."""
-        global pipeline
-
+        global pipeline, current_model_type, current_offloading_settings
+        self.device = device
+        self.image_saver = ImageSaver()
+        self.config_manager = ConfigManager()
+        
+        # Load initial pipeline if auto_load is True with default offloading enabled
+        if auto_load and pipeline is None:
+            pipeline = load_pipeline(
+                use_distilled=use_distilled, 
+                device=device,
+                enable_dit_offloading=True,
+                enable_reprompt_offloading=True,
+                enable_refiner_offloading=True
+            )
+            current_model_type = "distilled" if use_distilled else "regular"
         self.pipeline = pipeline
-        self.current_use_distilled = None
-
 
     def print_peak_memory(self):
-        import torch
+        """Print peak GPU memory usage."""
         stats = torch.cuda.memory_stats()
         peak_bytes_requirement = stats["allocated_bytes.all.peak"]
-        print(f"Before refiner Peak memory requirement: {peak_bytes_requirement / 1024 ** 3:.2f} GB")
+        print(f"Peak memory requirement: {peak_bytes_requirement / 1024 ** 3:.2f} GB")
 
-    @space_context(duration=300)
-    def generate_image(self, 
-                      prompt: str,
-                      negative_prompt: str,
-                      width: int,
-                      height: int,
-                      num_inference_steps: int,
-                      guidance_scale: float,
-                      seed: int,
-                      use_reprompt: bool,
-                      use_refiner: bool,
-                      # use_distilled: bool
-                      ) -> Tuple[Optional[Image.Image], str]:
-        """Generate an image using the HunyuanImage pipeline."""
+    def switch_model(self, model_type: str, enable_dit_offloading: bool, 
+                    enable_reprompt_offloading: bool, enable_refiner_offloading: bool) -> str:
+        """Switch between models and update offloading settings."""
+        global pipeline, current_model_type, current_offloading_settings
+        
         try:
-            torch.cuda.empty_cache()
-
-            if self.pipeline is None:
-                return None, "Pipeline not loaded. Please try again."
-
-
+            use_distilled = (model_type == "distilled")
+            
+            # Check if we need to reload due to model or offloading changes
+            offloading_changed = (
+                current_offloading_settings['dit'] != enable_dit_offloading or
+                current_offloading_settings['reprompt'] != enable_reprompt_offloading or
+                current_offloading_settings['refiner'] != enable_refiner_offloading
+            )
+            
+            if current_model_type != model_type or offloading_changed:
+                print(f"Reloading pipeline with new settings...")
+                print(f"  Model: {model_type}")
+                print(f"  DiT offloading: {enable_dit_offloading}")
+                print(f"  Reprompt offloading: {enable_reprompt_offloading}")
+                print(f"  Refiner offloading: {enable_refiner_offloading}")
+                
+                # Clear GPU memory
+                if pipeline is not None:
+                    del pipeline
+                    torch.cuda.empty_cache()
+                
+                # Load new pipeline with updated settings
+                pipeline = load_pipeline(
+                    use_distilled=use_distilled, 
+                    device=self.device,
+                    enable_dit_offloading=enable_dit_offloading,
+                    enable_reprompt_offloading=enable_reprompt_offloading,
+                    enable_refiner_offloading=enable_refiner_offloading
+                )
+                self.pipeline = pipeline
+                current_model_type = model_type
+                current_offloading_settings = {
+                    'dit': enable_dit_offloading,
+                    'reprompt': enable_reprompt_offloading,
+                    'refiner': enable_refiner_offloading
+                }
+                
+                return f"Pipeline reloaded with updated settings"
+            else:
+                return f"No changes needed - already using these settings"
+                
+        except Exception as e:
+            return f"Error updating pipeline: {str(e)}"
+    
+    def generate_single_image(self, 
+                            prompt: str,
+                            negative_prompt: str,
+                            width: int,
+                            height: int,
+                            num_inference_steps: int,
+                            guidance_scale: float,
+                            seed: int,
+                            use_reprompt: bool,
+                            use_refiner: bool,
+                            refiner_steps: int,
+                            auto_enhance: bool) -> Tuple[Optional[Image.Image], Optional[Image.Image], Dict]:
+        """Generate a single image and return it with metadata."""
+        torch.cuda.empty_cache()
+        
+        # Auto enhance prompt if requested
+        enhanced_prompt = prompt
+        if auto_enhance and use_reprompt:
+            self.pipeline.to('cpu')
             if hasattr(self.pipeline, '_refiner_pipeline'):
                 self.pipeline.refiner_pipeline.to('cpu')
-            self.pipeline.to('cuda')
-            if seed == -1:
-                import random
-                seed = random.randint(100000, 999999)
-
-            # Generate image
-            image = self.pipeline(
-                prompt=prompt,
+            enhanced_prompt = self.pipeline.reprompt_model.predict(prompt)
+        
+        # Move pipeline to GPU
+        if hasattr(self.pipeline, '_refiner_pipeline'):
+            self.pipeline.refiner_pipeline.to('cpu')
+        self.pipeline.to('cuda')
+        
+        # Generate seed if random
+        if seed == -1:
+            seed = random.randint(100000, 999999)
+        
+        # Create metadata
+        global current_model_type, current_offloading_settings
+        metadata = {
+            'model_type': current_model_type,
+            'enable_dit_offloading': current_offloading_settings['dit'],
+            'enable_reprompt_offloading': current_offloading_settings['reprompt'],
+            'enable_refiner_offloading': current_offloading_settings['refiner'],
+            'prompt': enhanced_prompt if auto_enhance else prompt,
+            'original_prompt': prompt if auto_enhance else None,
+            'negative_prompt': negative_prompt,
+            'width': width,
+            'height': height,
+            'num_inference_steps': num_inference_steps,
+            'guidance_scale': guidance_scale,
+            'seed': seed,
+            'use_reprompt': use_reprompt,
+            'use_refiner': use_refiner,
+            'refiner_steps': refiner_steps if use_refiner else None,
+            'auto_enhance': auto_enhance
+        }
+        
+        # Generate image
+        pre_refiner_image = None
+        
+        if use_refiner:
+            # Generate base image first without refiner
+            base_image = self.pipeline(
+                prompt=enhanced_prompt if auto_enhance else prompt,
                 negative_prompt=negative_prompt,
                 width=width,
                 height=height,
                 num_inference_steps=num_inference_steps,
                 guidance_scale=guidance_scale,
                 seed=seed,
-                use_reprompt=use_reprompt,
-                use_refiner=use_refiner
+                use_reprompt=use_reprompt and not auto_enhance,  # Don't double-enhance
+                use_refiner=False
             )
-            self.print_peak_memory()
-            return image, "Image generated successfully!"
-                
-        except Exception as e:
-            error_msg = f"Error generating image: {str(e)}"
-            print(f"✗ {error_msg}")
-            return None, error_msg
+            pre_refiner_image = base_image
+            
+            # Apply refiner
+            self.pipeline.to('cpu')
+            self.pipeline.refiner_pipeline.to('cuda')
+            
+            final_image = self.pipeline.refiner_pipeline(
+                image=base_image,
+                prompt=enhanced_prompt if auto_enhance else prompt,
+                negative_prompt=negative_prompt,
+                width=width,
+                height=height,
+                num_inference_steps=refiner_steps,
+                guidance_scale=guidance_scale,
+                shift=5,
+                seed=seed
+            )
+        else:
+            final_image = self.pipeline(
+                prompt=enhanced_prompt if auto_enhance else prompt,
+                negative_prompt=negative_prompt,
+                width=width,
+                height=height,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                seed=seed,
+                use_reprompt=use_reprompt and not auto_enhance,
+                use_refiner=False
+            )
+        
+        self.print_peak_memory()
+        return final_image, pre_refiner_image, metadata
 
-    @space_context(duration=300)
-    def enhance_prompt(self, prompt: str, # use_distilled: bool
-                       ) -> Tuple[str, str]:
+    def generate_images(self,
+                       model_type: str,
+                       enable_dit_offloading: bool,
+                       enable_reprompt_offloading: bool,
+                       enable_refiner_offloading: bool,
+                       prompt: str,
+                       negative_prompt: str,
+                       width: int,
+                       height: int,
+                       num_inference_steps: int,
+                       guidance_scale: float,
+                       seed: int,
+                       use_reprompt: bool,
+                       use_refiner: bool,
+                       refiner_steps: int,
+                       auto_enhance: bool,
+                       num_generations: int) -> Tuple[List[Image.Image], str]:
+        """Generate multiple images with proper seed handling."""
+        try:
+            # Switch model/settings if needed
+            switch_status = self.switch_model(model_type, enable_dit_offloading, 
+                                            enable_reprompt_offloading, enable_refiner_offloading)
+            print(switch_status)
+            
+            if self.pipeline is None:
+                return [], "Pipeline not loaded. Please try again."
+            
+            generated_images = []
+            saved_paths = []
+            
+            for i in range(num_generations):
+                # Calculate seed for this generation
+                if seed == -1:
+                    current_seed = -1  # Will be randomized in generate_single_image
+                else:
+                    current_seed = seed + i
+                
+                # Generate single image
+                image, pre_refiner_image, metadata = self.generate_single_image(
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    width=width,
+                    height=height,
+                    num_inference_steps=num_inference_steps,
+                    guidance_scale=guidance_scale,
+                    seed=current_seed,
+                    use_reprompt=use_reprompt,
+                    use_refiner=use_refiner,
+                    refiner_steps=refiner_steps,
+                    auto_enhance=auto_enhance
+                )
+                
+                # Save pre-refiner image if it exists
+                if pre_refiner_image:
+                    pre_path = self.image_saver.save_image(pre_refiner_image, metadata, is_pre_refiner=True)
+                    print(f"Saved pre-refiner image: {pre_path}")
+                
+                # Save final image
+                path = self.image_saver.save_image(image, metadata)
+                saved_paths.append(path)
+                generated_images.append(image)
+                print(f"Saved image {i+1}/{num_generations}: {path}")
+            
+            status = f"Successfully generated {num_generations} image(s)!\nSaved to: {', '.join(saved_paths)}"
+            return generated_images, status
+            
+        except Exception as e:
+            error_msg = f"Error generating images: {str(e)}"
+            print(f"✗ {error_msg}")
+            return [], error_msg
+
+    def enhance_prompt(self, prompt: str) -> Tuple[str, str]:
         """Enhance a prompt using the reprompt model."""
         try:
             torch.cuda.empty_cache()
 
-            # Load pipeline if needed
             if self.pipeline is None:
                 return prompt, "Pipeline not loaded. Please try again."
             
@@ -271,7 +560,6 @@ class HunyuanImageApp:
             if hasattr(self.pipeline, '_refiner_pipeline'):
                 self.pipeline.refiner_pipeline.to('cpu')
 
-            # Use reprompt model from the main pipeline
             enhanced_prompt = self.pipeline.reprompt_model.predict(prompt)
             self.print_peak_memory()
             return enhanced_prompt, "Prompt enhanced successfully!"
@@ -281,85 +569,62 @@ class HunyuanImageApp:
             print(f"✗ {error_msg}")
             return prompt, error_msg
 
-    @space_context(duration=300)
-    def refine_image(self, 
-                    image: Image.Image,
-                    prompt: str,
-                    negative_prompt: str,
-                    width: int,
-                    height: int,
-                    num_inference_steps: int,
-                    guidance_scale: float,
-                    seed: int) -> Tuple[Optional[Image.Image], str]:
-        """Refine an image using the refiner pipeline."""
+    def open_outputs_folder(self):
+        """Open the outputs folder in the system file explorer."""
         try:
-            if image is None:
-                return None, "Please upload an image to refine."
-
-            torch.cuda.empty_cache()
-
-            # Resize image to target dimensions if needed
-            if image.size != (width, height):
-                image = image.resize((width, height), Image.Resampling.LANCZOS)
-
-            self.pipeline.to('cpu')
-            self.pipeline.refiner_pipeline.to('cuda')
-            if seed == -1:
-                import random
-                seed = random.randint(100000, 999999)
+            folder_path = str(OUTPUTS_DIR.absolute())
             
-            # Use refiner from the main pipeline
-            refined_image = self.pipeline.refiner_pipeline(
-                image=image,
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                width=width,
-                height=height,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                shift=5,
-                seed=seed
-            )
-            self.print_peak_memory()
-            return refined_image, "Image refined successfully!"
+            if platform.system() == 'Windows':
+                os.startfile(folder_path)
+            elif platform.system() == 'Darwin':  # macOS
+                subprocess.run(['open', folder_path])
+            else:  # Linux
+                subprocess.run(['xdg-open', folder_path])
             
+            return f"Opened folder: {folder_path}"
         except Exception as e:
-            error_msg = f"Error refining image: {str(e)}"
-            print(f"✗ {error_msg}")
-            return None, error_msg
-    
-    
-    def download_single_checkpoint(self, checkpoint_name: str) -> Tuple[bool, str]:
-        """Download a single checkpoint."""
-        try:
-            success, message = self.downloader.download_checkpoint(checkpoint_name)
-            return success, message
-        except Exception as e:
-            return False, f"Download error: {str(e)}"
-    
-    def download_all_checkpoints(self) -> Tuple[bool, str, Dict[str, any]]:
-        """Download all missing checkpoints."""
-        try:
-            success, message, results = self.downloader.download_all_checkpoints()
-            return success, message, results
-        except Exception as e:
-            return False, f"Download error: {str(e)}", {}
+            return f"Error opening folder: {str(e)}"
+
+    def save_config(self, config_name: str, **params) -> str:
+        """Save current configuration."""
+        if not config_name:
+            return "Please enter a configuration name"
+        
+        # Remove None values and input_image
+        clean_params = {k: v for k, v in params.items() 
+                       if v is not None and k != 'input_image'}
+        
+        if self.config_manager.save_config(config_name, clean_params):
+            return f"Configuration '{config_name}' saved successfully!"
+        return "Failed to save configuration"
+
+    def load_config(self, config_name: str) -> Tuple[Dict, str]:
+        """Load a configuration."""
+        if not config_name:
+            return {}, "Please select a configuration"
+        
+        params = self.config_manager.load_config(config_name)
+        if params:
+            return params, f"Configuration '{config_name}' loaded successfully!"
+        return {}, f"Failed to load configuration '{config_name}'"
+
+    def get_config_list(self) -> List[str]:
+        """Get list of available configurations."""
+        return self.config_manager.list_configs()
+
 
 def create_interface(auto_load: bool = True, use_distilled: bool = False, device: str = "cuda"):
     """Create the Gradio interface."""
     app = HunyuanImageApp(auto_load=auto_load, use_distilled=use_distilled, device=device)
     
-    # Custom CSS for better styling with dark mode support
+    # Load last configuration if available
+    last_config = app.config_manager.load_last_config()
+    
+    # Custom CSS
     css = """
     .gradio-container {
-        max-width: 1200px !important;
+        max-width: 1400px !important;
         margin: auto !important;
-    }
-    .tab-nav {
-        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-        border-radius: 10px;
-        padding: 10px;
-        margin-bottom: 20px;
     }
     .model-info {
         background: var(--background-fill-secondary);
@@ -367,16 +632,6 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
         border-radius: 8px;
         padding: 15px;
         margin-bottom: 20px;
-        color: var(--body-text-color);
-    }
-    .model-info h1, .model-info h2, .model-info h3 {
-        color: var(--body-text-color) !important;
-    }
-    .model-info p, .model-info li {
-        color: var(--body-text-color) !important;
-    }
-    .model-info strong {
-        color: var(--body-text-color) !important;
     }
     """
     
@@ -384,89 +639,162 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
         gr.Markdown(
             """
             # 🎨 HunyuanImage 2.1 Pipeline
-            **HunyuanImage-2.1: An Efficient Diffusion Model for High-Resolution (2K) Text-to-Image Generation​**
-            
-            This app provides three main functionalities:
-            1. **Text-to-Image Generation**: Generate high-quality images from text prompts
-            2. **Prompt Enhancement**: Improve your prompts using MLLM reprompting
-            3. **Image Refinement**: Enhance existing images with the refiner model
+            **High-Resolution (2K) Text-to-Image Generation**
             """,
             elem_classes="model-info"
         )
         
         with gr.Tabs():
-            # Tab 1: Text-to-Image Generation
+            # Text-to-Image Generation Tab
             with gr.Tab("🖼️ Text-to-Image Generation"):
                 with gr.Row():
                     with gr.Column(scale=1):
                         gr.Markdown("### Generation Settings")
-                        gr.Markdown("**Model**: HunyuanImage v2.1 (Non-distilled)")
                         
-                        # use_distilled = gr.Checkbox(
-                        #     label="Use Distilled Model",
-                        #     value=False,
-                        #     info="Faster generation with slightly lower quality"
-                        # )
-                        use_distilled = False
+                        # Model selection
+                        model_type = gr.Radio(
+                            label="Model Type",
+                            choices=["regular", "distilled"],
+                            value=last_config.get('model_type', 'regular') if last_config else 'regular',
+                            info="Regular: Higher quality | Distilled: Faster generation"
+                        )
+                        
+                        # GPU Memory Optimization Settings
+                        gr.Markdown("### GPU Memory Optimization")
+                        with gr.Accordion("ℹ️ How Model Loading Works", open=False):
+                            gr.Markdown(
+                                """
+                                **Generation Process:**
+                                - **Without Refiner**: Single pass using main model (full inference steps)
+                                - **With Refiner**: Two-stage process:
+                                  1. Base generation with main model (full steps)
+                                  2. Refinement pass (default 4 steps, adjustable)
+                                
+                                **Memory Management:**
+                                - Only one model on GPU at a time
+                                - Models swap between CPU/GPU automatically
+                                - Offloading moves unused models to CPU to save VRAM
+                                
+                                **Recommended Settings:**
+                                - Enable all offloading for GPUs with ≤12GB VRAM
+                                - Disable offloading for GPUs with ≥24GB VRAM for faster generation
+                                """
+                            )
+                        
+                        with gr.Row():
+                            enable_dit_offloading = gr.Checkbox(
+                                label="DiT Offloading",
+                                value=last_config.get('enable_dit_offloading', True) if last_config else True,
+                                info="Move DiT model to CPU when not in use (saves VRAM)"
+                            )
+                            enable_reprompt_offloading = gr.Checkbox(
+                                label="Reprompt Offloading",
+                                value=last_config.get('enable_reprompt_offloading', True) if last_config else True,
+                                info="Move reprompt model to CPU when not in use"
+                            )
+                            enable_refiner_offloading = gr.Checkbox(
+                                label="Refiner Offloading",
+                                value=last_config.get('enable_refiner_offloading', True) if last_config else True,
+                                info="Move refiner model to CPU when not in use"
+                            )
+                        
+                        # Configuration management
+                        with gr.Row():
+                            config_dropdown = gr.Dropdown(
+                                label="Load Configuration",
+                                choices=app.get_config_list(),
+                                interactive=True
+                            )
+                            refresh_btn = gr.Button("🔄", size="sm")
+                        
+                        with gr.Row():
+                            config_name_input = gr.Textbox(
+                                label="Config Name",
+                                placeholder="Enter config name to save"
+                            )
+                            save_config_btn = gr.Button("💾 Save Config", size="sm")
                         
                         prompt = gr.Textbox(
                             label="Prompt",
-                            placeholder="",
                             lines=3,
-                            value="A cute, cartoon-style anthropomorphic penguin plush toy with fluffy fur, standing in a painting studio, wearing a red knitted scarf and a red beret with the word “Tencent” on it, holding a paintbrush with a focused expression as it paints an oil painting of the Mona Lisa, rendered in a photorealistic photographic style."
+                            value=last_config.get('prompt', "A cute cartoon penguin") if last_config else "A cute cartoon penguin"
                         )
                         
                         negative_prompt = gr.Textbox(
                             label="Negative Prompt",
-                            placeholder="",
                             lines=2,
-                            value=""
+                            value=last_config.get('negative_prompt', "") if last_config else ""
                         )
                         
                         with gr.Row():
                             width = gr.Slider(
-                                minimum=512, maximum=2048, step=64, value=2048,
-                                label="Width", info="Image width in pixels"
+                                minimum=512, maximum=2048, step=64,
+                                value=last_config.get('width', 1024) if last_config else 1024,
+                                label="Width"
                             )
                             height = gr.Slider(
-                                minimum=512, maximum=2048, step=64, value=2048,
-                                label="Height", info="Image height in pixels"
+                                minimum=512, maximum=2048, step=64,
+                                value=last_config.get('height', 1024) if last_config else 1024,
+                                label="Height"
                             )
                         
                         with gr.Row():
                             num_inference_steps = gr.Slider(
-                                minimum=10, maximum=100, step=5, value=50,
-                                label="Inference Steps", info="More steps = better quality, slower generation"
+                                minimum=10, maximum=100, step=5,
+                                value=last_config.get('num_inference_steps', 50) if last_config else 50,
+                                label="Inference Steps"
                             )
                             guidance_scale = gr.Slider(
-                                minimum=1.0, maximum=10.0, step=0.1, value=3.5,
-                                label="Guidance Scale", info="How closely to follow the prompt"
+                                minimum=1.0, maximum=10.0, step=0.1,
+                                value=last_config.get('guidance_scale', 3.5) if last_config else 3.5,
+                                label="Guidance Scale"
                             )
                         
                         with gr.Row():
                             seed = gr.Number(
-                                label="Seed", value=-1, precision=0,
-                                info="Random seed for reproducibility. (-1 for random seed)"
+                                label="Seed",
+                                value=last_config.get('seed', -1) if last_config else -1,
+                                precision=0
                             )
-                            use_reprompt = gr.Checkbox(
-                                label="Use Reprompt", value=True,
-                                info="Enhance prompt automatically"
-                            )
-                            use_refiner = gr.Checkbox(
-                                label="Use Refiner", value=True,
-                                info="Apply refiner after generation ",
-                                interactive=True
+                            num_generations = gr.Slider(
+                                minimum=1, maximum=20, step=1,
+                                value=last_config.get('num_generations', 1) if last_config else 1,
+                                label="Number of Images"
                             )
                         
-                        generate_btn = gr.Button("🎨 Generate Image", variant="primary", size="lg")
+                        with gr.Row():
+                            use_reprompt = gr.Checkbox(
+                                label="Use Reprompt",
+                                value=last_config.get('use_reprompt', True) if last_config else True
+                            )
+                            use_refiner = gr.Checkbox(
+                                label="Use Refiner",
+                                value=last_config.get('use_refiner', True) if last_config else True
+                            )
+                            auto_enhance = gr.Checkbox(
+                                label="Auto Enhance Prompt",
+                                value=last_config.get('auto_enhance', False) if last_config else False
+                            )
+                        
+                        with gr.Row():
+                            refiner_steps = gr.Slider(
+                                minimum=1, maximum=20, step=1,
+                                value=last_config.get('refiner_steps', 4) if last_config else 4,
+                                label="Refiner Steps",
+                                info="Number of refinement steps (only used when refiner is enabled)"
+                            )
+                        
+                        generate_btn = gr.Button("🎨 Generate Image(s)", variant="primary", size="lg")
+                        open_folder_btn = gr.Button("📁 Open Outputs Folder", variant="secondary")
                     
                     with gr.Column(scale=1):
-                        gr.Markdown("### Generated Image")
-                        generated_image = gr.Image(
-                            label="Generated Image",
-                            format="png",
-                            show_download_button=True,
-                            type="pil",
+                        gr.Markdown("### Generated Images")
+                        generated_images = gr.Gallery(
+                            label="Generated Images",
+                            show_label=False,
+                            elem_id="gallery",
+                            columns=2,
+                            rows=2,
                             height=600
                         )
                         generation_status = gr.Textbox(
@@ -475,23 +803,14 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                             value="Ready to generate"
                         )
             
-            # Tab 2: Prompt Enhancement
+            # Prompt Enhancement Tab
             with gr.Tab("✨ Prompt Enhancement"):
                 with gr.Row():
                     with gr.Column(scale=1):
-                        gr.Markdown("### Prompt Enhancement Settings")
-                        gr.Markdown("**Model**: HunyuanImage v2.1 Reprompt Model")
-                        
-                        # enhance_use_distilled = gr.Checkbox(
-                        #     label="Use Distilled Model",
-                        #     value=False,
-                        #     info="For loading the reprompt model"
-                        # )
-                        enhance_use_distilled = False
+                        gr.Markdown("### Prompt Enhancement")
                         
                         original_prompt = gr.Textbox(
                             label="Original Prompt",
-                            placeholder="A cat sitting on a table",
                             lines=4,
                             value="A cat sitting on a table"
                         )
@@ -510,82 +829,17 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                             interactive=False,
                             value="Ready to enhance"
                         )
-            
-            # # Tab 3: Image Refinement
-            # with gr.Tab("🔧 Image Refinement"):
-            #     with gr.Row():
-            #         with gr.Column(scale=1):
-            #             gr.Markdown("### Refinement Settings")
-            #             gr.Markdown("**Model**: HunyuanImage v2.1 Refiner")
-                        
-            #             input_image = gr.Image(
-            #                 label="Input Image",
-            #                 type="pil",
-            #                 height=300
-            #             )
-                        
-            #             refine_prompt = gr.Textbox(
-            #                 label="Refinement Prompt",
-            #                 placeholder="Make the image more detailed and high quality",
-            #                 lines=2,
-            #                 value="Make the image more detailed and high quality"
-            #             )
-                        
-            #             refine_negative_prompt = gr.Textbox(
-            #                 label="Negative Prompt",
-            #                 placeholder="",
-            #                 lines=2,
-            #                 value=""
-            #             )
-                        
-            #             with gr.Row():
-            #                 refine_width = gr.Slider(
-            #                     minimum=512, maximum=2048, step=64, value=2048,
-            #                     label="Width", info="Output width"
-            #                 )
-            #                 refine_height = gr.Slider(
-            #                     minimum=512, maximum=2048, step=64, value=2048,
-            #                     label="Height", info="Output height"
-            #                 )
-                        
-            #             with gr.Row():
-            #                 refine_steps = gr.Slider(
-            #                     minimum=1, maximum=20, step=1, value=4,
-            #                     label="Refinement Steps", info="More steps = more refinement"
-            #                 )
-            #                 refine_guidance = gr.Slider(
-            #                     minimum=1.0, maximum=10.0, step=0.1, value=3.5,
-            #                     label="Guidance Scale", info="How strongly to follow the prompt"
-            #                 )
-                        
-            #             refine_seed = gr.Number(
-            #                 label="Seed", value=-1, precision=0,
-            #                 info="Random seed for reproducibility"
-            #             )
-                        
-            #             refine_btn = gr.Button("🔧 Refine Image", variant="primary", size="lg")
-                    
-            #         with gr.Column(scale=1):
-            #             gr.Markdown("### Refined Image")
-            #             refined_image = gr.Image(
-            #                 label="Refined Image",
-            #                 type="pil",
-            #                 height=600
-            #             )
-            #             refinement_status = gr.Textbox(
-            #                 label="Status",
-            #                 interactive=False,
-            #                 value="Ready to refine"
-            #             )
         
         # Event handlers
         generate_btn.click(
-            fn=app.generate_image,
+            fn=app.generate_images,
             inputs=[
+                model_type, enable_dit_offloading, enable_reprompt_offloading, enable_refiner_offloading,
                 prompt, negative_prompt, width, height, num_inference_steps,
-                guidance_scale, seed, use_reprompt, use_refiner # , use_distilled
+                guidance_scale, seed, use_reprompt, use_refiner, refiner_steps, auto_enhance,
+                num_generations
             ],
-            outputs=[generated_image, generation_status]
+            outputs=[generated_images, generation_status]
         )
         
         enhance_btn.click(
@@ -594,53 +848,96 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
             outputs=[enhanced_prompt, enhancement_status]
         )
         
-        # refine_btn.click(
-        #    fn=app.refine_image,
-        #    inputs=[
-        #        input_image, refine_prompt, refine_negative_prompt,
-        #        refine_width, refine_height, refine_steps, refine_guidance, refine_seed
-        #    ],
-        #    outputs=[refined_image, refinement_status]
-        # )
+        open_folder_btn.click(
+            fn=app.open_outputs_folder,
+            outputs=[generation_status]
+        )
         
-        # Additional info
+        # Config management handlers
+        def save_and_refresh(config_name, **params):
+            status = app.save_config(config_name, **params)
+            configs = app.get_config_list()
+            return status, gr.update(choices=configs, value=config_name if config_name in configs else None)
+        
+        save_config_btn.click(
+            fn=save_and_refresh,
+            inputs=[
+                config_name_input, model_type, enable_dit_offloading, enable_reprompt_offloading,
+                enable_refiner_offloading, prompt, negative_prompt, width, height,
+                num_inference_steps, guidance_scale, seed, use_reprompt,
+                use_refiner, refiner_steps, auto_enhance, num_generations
+            ],
+            outputs=[generation_status, config_dropdown]
+        )
+        
+        def load_and_update(config_name):
+            params, status = app.load_config(config_name)
+            if params:
+                return (
+                    params.get('model_type', 'regular'),
+                    params.get('enable_dit_offloading', True),
+                    params.get('enable_reprompt_offloading', True),
+                    params.get('enable_refiner_offloading', True),
+                    params.get('prompt', ''),
+                    params.get('negative_prompt', ''),
+                    params.get('width', 1024),
+                    params.get('height', 1024),
+                    params.get('num_inference_steps', 50),
+                    params.get('guidance_scale', 3.5),
+                    params.get('seed', -1),
+                    params.get('use_reprompt', True),
+                    params.get('use_refiner', True),
+                    params.get('refiner_steps', 4),
+                    params.get('auto_enhance', False),
+                    params.get('num_generations', 1),
+                    status
+                )
+            return (
+                gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+                gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+                gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), 
+                gr.update(), status
+            )
+        
+        config_dropdown.change(
+            fn=load_and_update,
+            inputs=[config_dropdown],
+            outputs=[
+                model_type, enable_dit_offloading, enable_reprompt_offloading, enable_refiner_offloading,
+                prompt, negative_prompt, width, height, num_inference_steps,
+                guidance_scale, seed, use_reprompt, use_refiner, refiner_steps, auto_enhance,
+                num_generations, generation_status
+            ]
+        )
+        
+        refresh_btn.click(
+            fn=lambda: gr.update(choices=app.get_config_list()),
+            outputs=[config_dropdown]
+        )
+        
         gr.Markdown(
             """
-            ### 📝 Usage Tips
-            
-            **Text-to-Image Generation:**
-            - Use descriptive prompts with specific details
-            - Adjust guidance scale: higher values follow prompts more closely
-            - More inference steps generally produce better quality
-            - Enable reprompt for automatic prompt enhancement
-            - Enable refiner for additional quality improvement
-            
-            **Prompt Enhancement:**
-            - Enter your basic prompt idea
-            - The AI will enhance it with better structure and details
-            - Enhanced prompts often produce better results
-            
-            **Image Refinement:**
-            - Upload any image you want to improve
-            - Describe what improvements you want in the refinement prompt
-            - The refiner will enhance details and quality
-            - Works best with images generated by HunyuanImage
+            ### 📝 Features
+            - **Multi-generation**: Generate multiple images with sequential seeds
+            - **Auto-save**: All images saved to outputs folder with metadata
+            - **Config Management**: Save and load your favorite settings
+            - **Auto Enhance**: Automatically improve prompts before generation
+            - **Pre-refiner Images**: Saves both refined and pre-refined versions
+            - **GPU Memory Optimization**: Configurable model offloading to reduce VRAM usage
             """,
             elem_classes="model-info"
         )
     
     return demo
 
+
 if __name__ == "__main__":
-    import argparse
-    
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Launch HunyuanImage Gradio App")
+    parser.add_argument("--share", action="store_true", help="Enable Gradio live share")
     parser.add_argument("--no-auto-load", action="store_true", help="Disable auto-loading pipeline on startup")
     parser.add_argument("--use-distilled", action="store_true", help="Use distilled model")
     parser.add_argument("--device", type=str, default="cuda", help="Device to use (cuda/cpu)")
-    parser.add_argument("--port", type=int, default=8081, help="Port to run the app on")
-    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to")
     
     args = parser.parse_args()
     
@@ -649,18 +946,15 @@ if __name__ == "__main__":
     demo = create_interface(auto_load=auto_load, use_distilled=args.use_distilled, device=args.device)
     
     print("🚀 Starting HunyuanImage Gradio App...")
-    print(f"📱 The app will be available at: http://{args.host}:{args.port}")
     print(f"🔧 Auto-load pipeline: {'Yes' if auto_load else 'No'}")
-    print(f"🎯 Model type: {'Distilled' if args.use_distilled else 'Non-distilled'}")
+    print(f"🎯 Initial model type: {'Distilled' if args.use_distilled else 'Regular'}")
     print(f"💻 Device: {args.device}")
-    print("⚠️  Make sure you have the required model checkpoints downloaded!")
+    print(f"🌐 Share mode: {'Enabled' if args.share else 'Disabled'}")
+    print("⚠️  Make sure you have the required model checkpoints in the 'models' folder!")
     
     demo.launch(
-        server_name=args.host,
-        # server_port=args.port,
-        share=False,
+        share=args.share,
+        inbrowser=True,  # Open in browser by default
         show_error=True,
-        quiet=False,
-        max_threads=1,  # Default: sequential processing (recommended for GPU apps)
-        # max_threads=4,  # Enable parallel processing (requires more GPU memory)
+        quiet=False
     )
