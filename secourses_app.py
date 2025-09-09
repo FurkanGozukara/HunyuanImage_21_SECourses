@@ -255,12 +255,15 @@ def load_pipeline(use_distilled: bool = False,
                  device: str = "cuda",
                  enable_dit_offloading: bool = True,
                  enable_reprompt_offloading: bool = True,
-                 enable_refiner_offloading: bool = True):
+                 enable_refiner_offloading: bool = True,
+                 load_reprompt_model: bool = False):
     """Load the HunyuanImage pipeline with configurable offloading."""
     try:
         print(f"Loading HunyuanImage pipeline (distilled={use_distilled})...")
         print(f"  DiT offloading: {enable_dit_offloading}")
-        print(f"  Reprompt offloading: {enable_reprompt_offloading}")
+        print(f"  Reprompt model: {'Enabled' if load_reprompt_model else 'Disabled'}")
+        if load_reprompt_model:
+            print(f"  Reprompt offloading: {enable_reprompt_offloading}")
         print(f"  Refiner offloading: {enable_refiner_offloading}")
         
         # Set model root to our models directory
@@ -275,6 +278,9 @@ def load_pipeline(use_distilled: bool = False,
             enable_refiner_offloading=enable_refiner_offloading
         )
         pipeline.to('cpu')
+        
+        # Store whether reprompt model should be available
+        pipeline._should_load_reprompt = load_reprompt_model
         
         # Setup refiner pipeline
         refiner_pipeline = pipeline.refiner_pipeline
@@ -295,7 +301,8 @@ current_model_type = None
 current_offloading_settings = {
     'dit': True,
     'reprompt': True,
-    'refiner': True
+    'refiner': True,
+    'load_reprompt': False
 }
 
 
@@ -319,7 +326,8 @@ class HunyuanImageApp:
         print(f"Peak memory requirement: {peak_bytes_requirement / 1024 ** 3:.2f} GB")
 
     def switch_model(self, model_type: str, enable_dit_offloading: bool, 
-                    enable_reprompt_offloading: bool, enable_refiner_offloading: bool) -> str:
+                    enable_reprompt_offloading: bool, enable_refiner_offloading: bool,
+                    use_reprompt: bool) -> str:
         """Switch between models and update offloading settings."""
         global pipeline, current_model_type, current_offloading_settings
         
@@ -330,14 +338,17 @@ class HunyuanImageApp:
             offloading_changed = (
                 current_offloading_settings['dit'] != enable_dit_offloading or
                 current_offloading_settings['reprompt'] != enable_reprompt_offloading or
-                current_offloading_settings['refiner'] != enable_refiner_offloading
+                current_offloading_settings['refiner'] != enable_refiner_offloading or
+                current_offloading_settings.get('load_reprompt', False) != use_reprompt
             )
             
             if current_model_type != model_type or offloading_changed:
                 print(f"Reloading pipeline with new settings...")
                 print(f"  Model: {model_type}")
                 print(f"  DiT offloading: {enable_dit_offloading}")
-                print(f"  Reprompt offloading: {enable_reprompt_offloading}")
+                print(f"  Reprompt model: {'Enabled' if use_reprompt else 'Disabled'}")
+                if use_reprompt:
+                    print(f"  Reprompt offloading: {enable_reprompt_offloading}")
                 print(f"  Refiner offloading: {enable_refiner_offloading}")
                 
                 # Clear GPU memory
@@ -351,14 +362,16 @@ class HunyuanImageApp:
                     device=self.device,
                     enable_dit_offloading=enable_dit_offloading,
                     enable_reprompt_offloading=enable_reprompt_offloading,
-                    enable_refiner_offloading=enable_refiner_offloading
+                    enable_refiner_offloading=enable_refiner_offloading,
+                    load_reprompt_model=use_reprompt
                 )
                 self.pipeline = pipeline
                 current_model_type = model_type
                 current_offloading_settings = {
                     'dit': enable_dit_offloading,
                     'reprompt': enable_reprompt_offloading,
-                    'refiner': enable_refiner_offloading
+                    'refiner': enable_refiner_offloading,
+                    'load_reprompt': use_reprompt
                 }
                 
                 return f"Pipeline reloaded with updated settings"
@@ -369,7 +382,8 @@ class HunyuanImageApp:
             return f"Error updating pipeline: {str(e)}"
     
     def ensure_pipeline_loaded(self, model_type: str, enable_dit_offloading: bool, 
-                             enable_reprompt_offloading: bool, enable_refiner_offloading: bool):
+                             enable_reprompt_offloading: bool, enable_refiner_offloading: bool,
+                             use_reprompt: bool):
         """Ensure pipeline is loaded with the correct settings."""
         global pipeline, current_model_type, current_offloading_settings
         
@@ -382,14 +396,16 @@ class HunyuanImageApp:
                 device=self.device,
                 enable_dit_offloading=enable_dit_offloading,
                 enable_reprompt_offloading=enable_reprompt_offloading,
-                enable_refiner_offloading=enable_refiner_offloading
+                enable_refiner_offloading=enable_refiner_offloading,
+                load_reprompt_model=use_reprompt
             )
             self.pipeline = pipeline
             current_model_type = model_type
             current_offloading_settings = {
                 'dit': enable_dit_offloading,
                 'reprompt': enable_reprompt_offloading,
-                'refiner': enable_refiner_offloading
+                'refiner': enable_refiner_offloading,
+                'load_reprompt': use_reprompt
             }
             print(f"✓ Pipeline loaded with user settings")
     
@@ -404,17 +420,25 @@ class HunyuanImageApp:
                             use_reprompt: bool,
                             use_refiner: bool,
                             refiner_steps: int,
-                            auto_enhance: bool) -> Tuple[Optional[Image.Image], Optional[Image.Image], Dict]:
-        """Generate a single image and return it with metadata."""
+                            auto_enhance: bool) -> Tuple[Optional[Image.Image], Optional[Image.Image], Dict, str]:
+        """Generate a single image and return it with metadata and final prompt."""
         torch.cuda.empty_cache()
         
         # Auto enhance prompt if requested
         enhanced_prompt = prompt
-        if auto_enhance and use_reprompt:
+        actual_use_reprompt = use_reprompt
+        
+        # Check if reprompt model is available
+        has_reprompt = hasattr(self.pipeline, '_should_load_reprompt') and self.pipeline._should_load_reprompt
+        
+        if auto_enhance and use_reprompt and has_reprompt:
             self.pipeline.to('cpu')
             if hasattr(self.pipeline, '_refiner_pipeline'):
                 self.pipeline.refiner_pipeline.to('cpu')
             enhanced_prompt = self.pipeline.reprompt_model.predict(prompt)
+        elif (auto_enhance or use_reprompt) and not has_reprompt:
+            print("Warning: Reprompt requested but model not loaded. Using original prompt.")
+            actual_use_reprompt = False
         
         # Move pipeline to GPU
         if hasattr(self.pipeline, '_refiner_pipeline'):
@@ -459,7 +483,7 @@ class HunyuanImageApp:
                 num_inference_steps=num_inference_steps,
                 guidance_scale=guidance_scale,
                 seed=seed,
-                use_reprompt=use_reprompt and not auto_enhance,  # Don't double-enhance
+                use_reprompt=actual_use_reprompt and not auto_enhance and has_reprompt,  # Don't double-enhance
                 use_refiner=False
             )
             pre_refiner_image = base_image
@@ -488,12 +512,16 @@ class HunyuanImageApp:
                 num_inference_steps=num_inference_steps,
                 guidance_scale=guidance_scale,
                 seed=seed,
-                use_reprompt=use_reprompt and not auto_enhance,
+                use_reprompt=actual_use_reprompt and not auto_enhance and has_reprompt,
                 use_refiner=False
             )
         
         self.print_peak_memory()
-        return final_image, pre_refiner_image, metadata
+        
+        # Return the final prompt that was actually used
+        final_used_prompt = enhanced_prompt if (auto_enhance and has_reprompt) else prompt
+        
+        return final_image, pre_refiner_image, metadata, final_used_prompt
 
     def generate_images(self,
                        model_type: str,
@@ -511,23 +539,26 @@ class HunyuanImageApp:
                        use_refiner: bool,
                        refiner_steps: int,
                        auto_enhance: bool,
-                       num_generations: int) -> Tuple[List[Image.Image], str]:
+                       num_generations: int) -> Tuple[List[Image.Image], str, str]:
         """Generate multiple images with proper seed handling."""
         try:
             # Ensure pipeline is loaded with user settings on first generation
             self.ensure_pipeline_loaded(model_type, enable_dit_offloading,
-                                      enable_reprompt_offloading, enable_refiner_offloading)
+                                      enable_reprompt_offloading, enable_refiner_offloading,
+                                      use_reprompt)
             
             # Switch model/settings if needed (after initial load)
             switch_status = self.switch_model(model_type, enable_dit_offloading, 
-                                            enable_reprompt_offloading, enable_refiner_offloading)
+                                            enable_reprompt_offloading, enable_refiner_offloading,
+                                            use_reprompt)
             print(switch_status)
             
             if self.pipeline is None:
-                return [], "Pipeline not loaded. Please try again."
+                return [], "Pipeline not loaded. Please try again.", prompt
             
             generated_images = []
             saved_paths = []
+            final_used_prompt = prompt
             
             for i in range(num_generations):
                 # Calculate seed for this generation
@@ -537,7 +568,7 @@ class HunyuanImageApp:
                     current_seed = seed + i
                 
                 # Generate single image
-                image, pre_refiner_image, metadata = self.generate_single_image(
+                image, pre_refiner_image, metadata, final_used_prompt = self.generate_single_image(
                     prompt=prompt,
                     negative_prompt=negative_prompt,
                     width=width,
@@ -563,27 +594,35 @@ class HunyuanImageApp:
                 print(f"Saved image {i+1}/{num_generations}: {path}")
             
             status = f"Successfully generated {num_generations} image(s)!\nSaved to: {', '.join(saved_paths)}"
-            return generated_images, status
+            return generated_images, status, final_used_prompt
             
         except Exception as e:
             error_msg = f"Error generating images: {str(e)}"
             print(f"✗ {error_msg}")
-            return [], error_msg
+            return [], error_msg, prompt
 
     def enhance_prompt(self, prompt: str, model_type: str = "regular",
                       enable_dit_offloading: bool = True,
                       enable_reprompt_offloading: bool = True,
-                      enable_refiner_offloading: bool = True) -> Tuple[str, str]:
+                      enable_refiner_offloading: bool = True,
+                      use_reprompt: bool = False) -> Tuple[str, str]:
         """Enhance a prompt using the reprompt model."""
         try:
             torch.cuda.empty_cache()
             
             # Ensure pipeline is loaded with user settings on first use
             self.ensure_pipeline_loaded(model_type, enable_dit_offloading,
-                                      enable_reprompt_offloading, enable_refiner_offloading)
+                                      enable_reprompt_offloading, enable_refiner_offloading,
+                                      use_reprompt)
 
             if self.pipeline is None:
                 return prompt, "Pipeline not loaded. Please try again."
+            
+            # Check if reprompt model is available
+            has_reprompt = hasattr(self.pipeline, '_should_load_reprompt') and self.pipeline._should_load_reprompt
+            
+            if not has_reprompt:
+                return prompt, "Reprompt model not loaded. Enable 'Use Reprompt Model' first."
             
             self.pipeline.to('cpu')
             if hasattr(self.pipeline, '_refiner_pipeline'):
@@ -694,8 +733,14 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                                 - This ensures optimal memory usage based on your GPU configuration
                                 - Configure these settings BEFORE your first generation
                                 
+                                **Available Models:**
+                                - **Main DiT Model**: Core diffusion model for image generation (always loaded)
+                                - **Reprompt Model**: Optional LLM for prompt enhancement (only loaded if "Use Reprompt Model" is checked)
+                                - **Refiner Model**: Optional model for image refinement (loaded when refiner is used)
+                                
                                 **Generation Process:**
-                                - **Without Refiner**: Single pass using main model (full inference steps)
+                                - **Without Reprompt/Refiner**: Single pass using main model
+                                - **With Reprompt**: Enhances prompt before generation (adds ~7GB VRAM)
                                 - **With Refiner**: Two-stage process:
                                   1. Base generation with main model (full steps)
                                   2. Refinement pass (default 4 steps, adjustable)
@@ -704,10 +749,12 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                                 - Only one model on GPU at a time
                                 - Models swap between CPU/GPU automatically
                                 - Offloading moves unused models to CPU to save VRAM
+                                - Reprompt model is NOT loaded unless "Use Reprompt Model" is enabled
                                 
                                 **Recommended Settings:**
-                                - Enable all offloading for GPUs with ≤12GB VRAM
-                                - Disable offloading for GPUs with ≥24GB VRAM for faster generation
+                                - **≤12GB VRAM**: Enable all offloading, disable reprompt model
+                                - **16-20GB VRAM**: Enable offloading, use reprompt carefully
+                                - **≥24GB VRAM**: Disable offloading for speed, reprompt model OK
                                 """
                             )
                         
@@ -720,7 +767,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                             enable_reprompt_offloading = gr.Checkbox(
                                 label="Reprompt Offloading",
                                 value=last_config.get('enable_reprompt_offloading', True) if last_config else True,
-                                info="Move reprompt model to CPU when not in use"
+                                info="Move reprompt model to CPU when not in use (only applies if reprompt model is enabled)"
                             )
                             enable_refiner_offloading = gr.Checkbox(
                                 label="Refiner Offloading",
@@ -832,20 +879,53 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                                 label="Number of Images"
                             )
                         
-                        with gr.Row():
-                            use_reprompt = gr.Checkbox(
-                                label="Use Reprompt",
-                                value=last_config.get('use_reprompt', True) if last_config else True
-                            )
-                            use_refiner = gr.Checkbox(
-                                label="Use Refiner",
-                                value=last_config.get('use_refiner', True) if last_config else True
+                        gr.Markdown("### Model Features")
+                        with gr.Accordion("ℹ️ Understanding Reprompt Options", open=False):
+                            gr.Markdown(
+                                """
+                                **Use Reprompt Model vs Auto Enhance Prompt:**
+                                
+                                **Use Reprompt Model** (checkbox below):
+                                - Controls whether the reprompt LLM model is loaded into memory
+                                - Must be enabled to use ANY prompt enhancement features
+                                - Adds ~7GB VRAM requirement when enabled
+                                - If disabled, no prompt enhancement is possible
+                                
+                                **Auto Enhance Prompt** (checkbox below):
+                                - Only works if "Use Reprompt Model" is enabled
+                                - When checked: Automatically enhances your prompt before every generation
+                                - When unchecked: Uses your original prompt as-is
+                                - Enhanced prompt will be shown in the prompt box after generation
+                                
+                                **Manual Enhancement** (in Prompt Enhancement tab):
+                                - Requires "Use Reprompt Model" to be enabled
+                                - Lets you enhance prompts manually and see results before using them
+                                - Good for testing and fine-tuning prompts
+                                
+                                **Example Workflow:**
+                                1. Enable "Use Reprompt Model" to load the enhancement model
+                                2. Either:
+                                   - Enable "Auto Enhance" for automatic enhancement on every generation
+                                   - OR use the Prompt Enhancement tab to manually enhance and review
+                                """
                             )
                         
                         with gr.Row():
+                            use_reprompt = gr.Checkbox(
+                                label="Use Reprompt Model",
+                                value=last_config.get('use_reprompt', False) if last_config else False,
+                                info="Load the reprompt LLM model into memory (required for any prompt enhancement, +7GB VRAM)"
+                            )
                             auto_enhance = gr.Checkbox(
                                 label="Auto Enhance Prompt",
-                                value=last_config.get('auto_enhance', False) if last_config else False
+                                value=last_config.get('auto_enhance', False) if last_config else False,
+                                info="Automatically enhance every prompt before generation (requires 'Use Reprompt Model' to be enabled)"
+                            )
+                        
+                        with gr.Row():
+                            use_refiner = gr.Checkbox(
+                                label="Use Refiner",
+                                value=last_config.get('use_refiner', True) if last_config else True
                             )
                             refiner_steps = gr.Slider(
                                 minimum=1, maximum=20, step=1,
@@ -875,7 +955,15 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
             with gr.Tab("✨ Prompt Enhancement"):
                 with gr.Row():
                     with gr.Column(scale=1):
-                        gr.Markdown("### Prompt Enhancement")
+                        gr.Markdown("### Manual Prompt Enhancement")
+                        gr.Markdown(
+                            """
+                            **Note:** This tab requires "Use Reprompt Model" to be enabled in the Text-to-Image tab.
+                            
+                            Use this to manually enhance prompts and review them before generation.
+                            The enhanced prompt can be copied and used in the main generation tab.
+                            """
+                        )
                         
                         original_prompt = gr.Textbox(
                             label="Original Prompt",
@@ -895,7 +983,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                         enhancement_status = gr.Textbox(
                             label="Status",
                             interactive=False,
-                            value="Ready to enhance"
+                            value="Ready to enhance (requires 'Use Reprompt Model' to be enabled)"
                         )
         
         # Event handlers
@@ -907,13 +995,13 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                 guidance_scale, seed, use_reprompt, use_refiner, refiner_steps, auto_enhance,
                 num_generations
             ],
-            outputs=[generated_images, generation_status]
+            outputs=[generated_images, generation_status, prompt]  # Return final prompt to prompt box
         )
         
         enhance_btn.click(
             fn=app.enhance_prompt,
             inputs=[original_prompt, model_type, enable_dit_offloading, 
-                   enable_reprompt_offloading, enable_refiner_offloading],
+                   enable_reprompt_offloading, enable_refiner_offloading, use_reprompt],
             outputs=[enhanced_prompt, enhancement_status]
         )
         
@@ -965,7 +1053,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                     params.get('num_inference_steps', 50),
                     params.get('guidance_scale', 3.5),
                     params.get('seed', -1),
-                    params.get('use_reprompt', True),
+                    params.get('use_reprompt', False),
                     params.get('use_refiner', True),
                     params.get('refiner_steps', 4),
                     params.get('auto_enhance', False),
@@ -1001,9 +1089,17 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
             - **Multi-generation**: Generate multiple images with sequential seeds
             - **Auto-save**: All images saved to outputs folder with metadata
             - **Config Management**: Save and load your favorite settings
-            - **Auto Enhance**: Automatically improve prompts before generation
+            - **Smart Prompt Enhancement**: 
+              - Optional reprompt model loading (saves 7GB VRAM when disabled)
+              - Auto-enhance mode for automatic prompt improvement
+              - Manual enhancement tab for testing and refinement
             - **Pre-refiner Images**: Saves both refined and pre-refined versions
             - **GPU Memory Optimization**: Configurable model offloading to reduce VRAM usage
+            
+            ### 💡 Quick Tips
+            - **Low VRAM?** Keep "Use Reprompt Model" disabled to save 7GB
+            - **Want better prompts?** Enable "Use Reprompt Model" first, then choose auto or manual enhancement
+            - **Testing prompts?** Use the Prompt Enhancement tab to preview enhanced versions
             """,
             elem_classes="model-info"
         )
