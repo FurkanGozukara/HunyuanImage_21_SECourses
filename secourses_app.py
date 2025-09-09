@@ -539,7 +539,7 @@ class HunyuanImageApp:
                        use_refiner: bool,
                        refiner_steps: int,
                        auto_enhance: bool,
-                       num_generations: int) -> Tuple[List[Image.Image], str, str]:
+                       num_generations: int) -> Tuple[List[str], str, str]:
         """Generate multiple images with proper seed handling."""
         try:
             # Ensure pipeline is loaded with user settings on first generation
@@ -556,8 +556,8 @@ class HunyuanImageApp:
             if self.pipeline is None:
                 return [], "Pipeline not loaded. Please try again.", prompt
             
-            generated_images = []
-            saved_paths = []
+            gallery_paths = []  # Paths for gallery display
+            saved_paths = []  # For status message
             final_used_prompt = prompt
             
             for i in range(num_generations):
@@ -590,11 +590,11 @@ class HunyuanImageApp:
                 # Save final image
                 path = self.image_saver.save_image(image, metadata)
                 saved_paths.append(path)
-                generated_images.append(image)
+                gallery_paths.append(path)  # Return file path for proper extension handling
                 print(f"Saved image {i+1}/{num_generations}: {path}")
             
             status = f"Successfully generated {num_generations} image(s)!\nSaved to: {', '.join(saved_paths)}"
-            return generated_images, status, final_used_prompt
+            return gallery_paths, status, final_used_prompt
             
         except Exception as e:
             error_msg = f"Error generating images: {str(e)}"
