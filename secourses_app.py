@@ -429,7 +429,8 @@ class HunyuanImageApp:
                             refiner_steps: int,
                             auto_enhance: bool,
                             main_shift: int = 4,
-                            refiner_shift: int = 1) -> Tuple[Optional[Image.Image], Optional[Image.Image], Dict, str]:
+                            refiner_shift: int = 1,
+                            refiner_guidance: float = 1.5) -> Tuple[Optional[Image.Image], Optional[Image.Image], Dict, str]:
         """Generate a single image and return it with metadata and final prompt."""
         torch.cuda.empty_cache()
         
@@ -480,6 +481,7 @@ class HunyuanImageApp:
             'use_reprompt': use_reprompt,
             'use_refiner': use_refiner,
             'refiner_steps': refiner_steps if use_refiner else None,
+            'refiner_guidance': refiner_guidance if use_refiner else None,
             'auto_enhance': auto_enhance,
             'main_shift': main_shift,
             'refiner_shift': refiner_shift
@@ -515,7 +517,7 @@ class HunyuanImageApp:
                 width=width,
                 height=height,
                 num_inference_steps=refiner_steps,
-                guidance_scale=guidance_scale,
+                guidance_scale=refiner_guidance,  # Use separate guidance for refiner
                 shift=refiner_shift,
                 seed=seed
             )
@@ -559,7 +561,8 @@ class HunyuanImageApp:
                        num_generations: int,
                        multi_line_prompt: bool,
                        main_shift: int = 4,
-                       refiner_shift: int = 1) -> Tuple[List[str], str, str]:
+                       refiner_shift: int = 1,
+                       refiner_guidance: float = 1.5) -> Tuple[List[str], str, str]:
         """Generate multiple images with proper seed handling."""
         try:
             # Ensure pipeline is loaded with user settings on first generation
@@ -621,7 +624,8 @@ class HunyuanImageApp:
                         refiner_steps=refiner_steps,
                         auto_enhance=auto_enhance,
                         main_shift=main_shift,
-                        refiner_shift=refiner_shift
+                        refiner_shift=refiner_shift,
+                        refiner_guidance=refiner_guidance
                     )
                     
                     # Update metadata with multi-line info if applicable
@@ -1049,6 +1053,14 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                                 info="Steps (when refiner enabled)"
                             )
                         
+                        with gr.Row():
+                            refiner_guidance = gr.Slider(
+                                minimum=0.5, maximum=5.0, step=0.1,
+                                value=last_config.get('refiner_guidance', 1.5) if last_config else 1.5,
+                                label="Refiner Guidance Scale",
+                                info="Lower values (1.0-2.0) work best for refinement to avoid noise"
+                            )
+                        
                         # Configuration management
                         gr.Markdown("### Configuration Management")
                         with gr.Row():
@@ -1109,7 +1121,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                 model_type, enable_dit_offloading, enable_reprompt_offloading, enable_refiner_offloading,
                 prompt, negative_prompt, width, height, num_inference_steps,
                 guidance_scale, seed, use_reprompt, use_refiner, refiner_steps, auto_enhance,
-                num_generations, multi_line_prompt, main_shift, refiner_shift
+                num_generations, multi_line_prompt, main_shift, refiner_shift, refiner_guidance
             ],
             outputs=[generated_images, generation_status, prompt]  # Return final prompt to prompt box
         )
@@ -1139,7 +1151,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                 enable_refiner_offloading, prompt, negative_prompt, aspect_ratio, width, height,
                 num_inference_steps, guidance_scale, seed, use_reprompt,
                 use_refiner, refiner_steps, auto_enhance, multi_line_prompt, num_generations,
-                main_shift, refiner_shift
+                main_shift, refiner_shift, refiner_guidance
             ],
             outputs=[generation_status, config_dropdown]
         )
@@ -1178,13 +1190,14 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                     params.get('num_generations', 1),
                     params.get('main_shift', 4),
                     params.get('refiner_shift', 1),
+                    params.get('refiner_guidance', 1.5),
                     status
                 )
             return (
                 gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
                 gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
                 gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), 
-                gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), status
+                gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), status
             )
         
         config_dropdown.change(
@@ -1194,7 +1207,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                 model_type, enable_dit_offloading, enable_reprompt_offloading, enable_refiner_offloading,
                 prompt, negative_prompt, aspect_ratio, width, height, num_inference_steps,
                 guidance_scale, seed, use_reprompt, use_refiner, refiner_steps, auto_enhance,
-                multi_line_prompt, num_generations, main_shift, refiner_shift, generation_status
+                multi_line_prompt, num_generations, main_shift, refiner_shift, refiner_guidance, generation_status
             ]
         )
         
