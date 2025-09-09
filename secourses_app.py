@@ -327,7 +327,7 @@ class HunyuanImageApp:
 
     def switch_model(self, model_type: str, enable_dit_offloading: bool, 
                     enable_reprompt_offloading: bool, enable_refiner_offloading: bool,
-                    use_reprompt: bool) -> str:
+                    use_reprompt: bool, auto_enhance: bool) -> str:
         """Switch between models and update offloading settings."""
         global pipeline, current_model_type, current_offloading_settings
         
@@ -342,12 +342,19 @@ class HunyuanImageApp:
                 current_offloading_settings.get('load_reprompt', False) != use_reprompt
             )
             
-            if current_model_type != model_type or offloading_changed:
+            # Special check: if reprompt is requested but not actually loaded in the pipeline
+            reprompt_mismatch = False
+            if pipeline is not None:
+                has_reprompt = hasattr(pipeline, '_should_load_reprompt') and pipeline._should_load_reprompt
+                # Check if reprompt or auto_enhance is enabled but model not loaded
+                reprompt_mismatch = ((use_reprompt or auto_enhance) and not has_reprompt)
+            
+            if current_model_type != model_type or offloading_changed or reprompt_mismatch:
                 print(f"Reloading pipeline with new settings...")
                 print(f"  Model: {model_type}")
                 print(f"  DiT offloading: {enable_dit_offloading}")
-                print(f"  Reprompt model: {'Enabled' if use_reprompt else 'Disabled'}")
-                if use_reprompt:
+                print(f"  Reprompt model: {'Enabled' if (use_reprompt or auto_enhance) else 'Disabled'}")
+                if (use_reprompt or auto_enhance):
                     print(f"  Reprompt offloading: {enable_reprompt_offloading}")
                 print(f"  Refiner offloading: {enable_refiner_offloading}")
                 
@@ -363,7 +370,7 @@ class HunyuanImageApp:
                     enable_dit_offloading=enable_dit_offloading,
                     enable_reprompt_offloading=enable_reprompt_offloading,
                     enable_refiner_offloading=enable_refiner_offloading,
-                    load_reprompt_model=use_reprompt
+                    load_reprompt_model=(use_reprompt or auto_enhance)
                 )
                 self.pipeline = pipeline
                 current_model_type = model_type
@@ -371,7 +378,7 @@ class HunyuanImageApp:
                     'dit': enable_dit_offloading,
                     'reprompt': enable_reprompt_offloading,
                     'refiner': enable_refiner_offloading,
-                    'load_reprompt': use_reprompt
+                    'load_reprompt': (use_reprompt or auto_enhance)
                 }
                 
                 return f"Pipeline reloaded with updated settings"
@@ -383,7 +390,7 @@ class HunyuanImageApp:
     
     def ensure_pipeline_loaded(self, model_type: str, enable_dit_offloading: bool, 
                              enable_reprompt_offloading: bool, enable_refiner_offloading: bool,
-                             use_reprompt: bool):
+                             use_reprompt: bool, auto_enhance: bool = False):
         """Ensure pipeline is loaded with the correct settings."""
         global pipeline, current_model_type, current_offloading_settings
         
@@ -397,7 +404,7 @@ class HunyuanImageApp:
                 enable_dit_offloading=enable_dit_offloading,
                 enable_reprompt_offloading=enable_reprompt_offloading,
                 enable_refiner_offloading=enable_refiner_offloading,
-                load_reprompt_model=use_reprompt
+                load_reprompt_model=(use_reprompt or auto_enhance)
             )
             self.pipeline = pipeline
             current_model_type = model_type
@@ -405,7 +412,7 @@ class HunyuanImageApp:
                 'dit': enable_dit_offloading,
                 'reprompt': enable_reprompt_offloading,
                 'refiner': enable_refiner_offloading,
-                'load_reprompt': use_reprompt
+                'load_reprompt': (use_reprompt or auto_enhance)
             }
             print(f"✓ Pipeline loaded with user settings")
     
@@ -539,18 +546,19 @@ class HunyuanImageApp:
                        use_refiner: bool,
                        refiner_steps: int,
                        auto_enhance: bool,
-                       num_generations: int) -> Tuple[List[str], str, str]:
+                       num_generations: int,
+                       multi_line_prompt: bool) -> Tuple[List[str], str, str]:
         """Generate multiple images with proper seed handling."""
         try:
             # Ensure pipeline is loaded with user settings on first generation
             self.ensure_pipeline_loaded(model_type, enable_dit_offloading,
                                       enable_reprompt_offloading, enable_refiner_offloading,
-                                      use_reprompt)
+                                      use_reprompt, auto_enhance)
             
             # Switch model/settings if needed (after initial load)
             switch_status = self.switch_model(model_type, enable_dit_offloading, 
                                             enable_reprompt_offloading, enable_refiner_offloading,
-                                            use_reprompt)
+                                            use_reprompt, auto_enhance)
             print(switch_status)
             
             if self.pipeline is None:
@@ -560,41 +568,76 @@ class HunyuanImageApp:
             saved_paths = []  # For status message
             final_used_prompt = prompt
             
-            for i in range(num_generations):
-                # Calculate seed for this generation
-                if seed == -1:
-                    current_seed = -1  # Will be randomized in generate_single_image
+            # Handle multi-line prompt mode
+            prompts_to_process = []
+            if multi_line_prompt:
+                # Split by lines and filter out empty lines
+                lines = [line.strip() for line in prompt.split('\n') if line.strip()]
+                if lines:
+                    prompts_to_process = lines
                 else:
-                    current_seed = seed + i
-                
-                # Generate single image
-                image, pre_refiner_image, metadata, final_used_prompt = self.generate_single_image(
-                    prompt=prompt,
-                    negative_prompt=negative_prompt,
-                    width=width,
-                    height=height,
-                    num_inference_steps=num_inference_steps,
-                    guidance_scale=guidance_scale,
-                    seed=current_seed,
-                    use_reprompt=use_reprompt,
-                    use_refiner=use_refiner,
-                    refiner_steps=refiner_steps,
-                    auto_enhance=auto_enhance
-                )
-                
-                # Save pre-refiner image if it exists
-                if pre_refiner_image:
-                    pre_path = self.image_saver.save_image(pre_refiner_image, metadata, is_pre_refiner=True)
-                    print(f"Saved pre-refiner image: {pre_path}")
-                
-                # Save final image
-                path = self.image_saver.save_image(image, metadata)
-                saved_paths.append(path)
-                gallery_paths.append(path)  # Return file path for proper extension handling
-                print(f"Saved image {i+1}/{num_generations}: {path}")
+                    prompts_to_process = [prompt]  # Fallback to original if no valid lines
+            else:
+                prompts_to_process = [prompt]
             
-            status = f"Successfully generated {num_generations} image(s)!\nSaved to: {', '.join(saved_paths)}"
-            return gallery_paths, status, final_used_prompt
+            # Calculate total images to generate
+            total_images = len(prompts_to_process) * num_generations
+            image_counter = 0
+            
+            # Process each prompt
+            for prompt_line in prompts_to_process:
+                for gen_idx in range(num_generations):
+                    image_counter += 1
+                    # Calculate seed for this generation
+                    if seed == -1:
+                        current_seed = -1  # Will be randomized in generate_single_image
+                    else:
+                        # For multi-line, increment seed across all images
+                        current_seed = seed + (image_counter - 1)
+                
+                    # Generate single image with current prompt line
+                    image, pre_refiner_image, metadata, used_prompt = self.generate_single_image(
+                        prompt=prompt_line,
+                        negative_prompt=negative_prompt,
+                        width=width,
+                        height=height,
+                        num_inference_steps=num_inference_steps,
+                        guidance_scale=guidance_scale,
+                        seed=current_seed,
+                        use_reprompt=use_reprompt,
+                        use_refiner=use_refiner,
+                        refiner_steps=refiner_steps,
+                        auto_enhance=auto_enhance
+                    )
+                    
+                    # Update metadata with multi-line info if applicable
+                    if multi_line_prompt:
+                        metadata['prompt_line_index'] = prompts_to_process.index(prompt_line)
+                        metadata['total_prompt_lines'] = len(prompts_to_process)
+                    
+                    # Save pre-refiner image if it exists
+                    if pre_refiner_image:
+                        pre_path = self.image_saver.save_image(pre_refiner_image, metadata, is_pre_refiner=True)
+                        print(f"Saved pre-refiner image: {pre_path}")
+                    
+                    # Save final image
+                    path = self.image_saver.save_image(image, metadata)
+                    saved_paths.append(path)
+                    gallery_paths.append(path)  # Return file path for proper extension handling
+                    
+                    # Update final_used_prompt for single-line mode
+                    if not multi_line_prompt:
+                        final_used_prompt = used_prompt
+                    
+                    print(f"Saved image {image_counter}/{total_images}: {path}")
+            
+            if multi_line_prompt:
+                status = f"Successfully generated {total_images} image(s) from {len(prompts_to_process)} prompt lines!\nSaved to outputs folder"
+                # Don't update prompt box for multi-line mode
+                return gallery_paths, status, prompt
+            else:
+                status = f"Successfully generated {num_generations} image(s)!\nSaved to: {', '.join(saved_paths)}"
+                return gallery_paths, status, final_used_prompt
             
         except Exception as e:
             error_msg = f"Error generating images: {str(e)}"
@@ -605,7 +648,8 @@ class HunyuanImageApp:
                       enable_dit_offloading: bool = True,
                       enable_reprompt_offloading: bool = True,
                       enable_refiner_offloading: bool = True,
-                      use_reprompt: bool = False) -> Tuple[str, str]:
+                      use_reprompt: bool = False,
+                      auto_enhance: bool = False) -> Tuple[str, str]:
         """Enhance a prompt using the reprompt model."""
         try:
             torch.cuda.empty_cache()
@@ -613,7 +657,7 @@ class HunyuanImageApp:
             # Ensure pipeline is loaded with user settings on first use
             self.ensure_pipeline_loaded(model_type, enable_dit_offloading,
                                       enable_reprompt_offloading, enable_refiner_offloading,
-                                      use_reprompt)
+                                      use_reprompt, auto_enhance)
 
             if self.pipeline is None:
                 return prompt, "Pipeline not loaded. Please try again."
@@ -622,7 +666,7 @@ class HunyuanImageApp:
             has_reprompt = hasattr(self.pipeline, '_should_load_reprompt') and self.pipeline._should_load_reprompt
             
             if not has_reprompt:
-                return prompt, "Reprompt model not loaded. Enable 'Use Reprompt Model' first."
+                return prompt, "Reprompt model not loaded. Enable 'Use Reprompt Model' or 'Auto Enhance Prompt' first."
             
             self.pipeline.to('cpu')
             if hasattr(self.pipeline, '_refiner_pipeline'):
@@ -778,7 +822,8 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                         prompt = gr.Textbox(
                             label="Prompt",
                             lines=3,
-                            value=last_config.get('prompt', "A cute cartoon penguin") if last_config else "A cute cartoon penguin"
+                            value=last_config.get('prompt', "A cute cartoon penguin") if last_config else "A cute cartoon penguin",
+                            placeholder="Enter your prompt here. With Multi-Line mode, each line becomes a separate generation."
                         )
                         
                         negative_prompt = gr.Textbox(
@@ -923,6 +968,45 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                             )
                         
                         with gr.Row():
+                            multi_line_prompt = gr.Checkbox(
+                                label="Multi-Line Prompt",
+                                value=last_config.get('multi_line_prompt', False) if last_config else False,
+                                info="Process each line of the prompt as a separate generation (won't return enhanced prompts to box)"
+                            )
+                        
+                        with gr.Accordion("ℹ️ Multi-Line Prompt Mode", open=False):
+                            gr.Markdown(
+                                """
+                                **How Multi-Line Prompt Works:**
+                                
+                                When enabled, each line in your prompt box becomes a separate image generation:
+                                - Line 1 → Image(s) with prompt from line 1
+                                - Line 2 → Image(s) with prompt from line 2
+                                - And so on...
+                                
+                                **Example:**
+                                ```
+                                A majestic mountain at sunrise
+                                A serene lake with reflection
+                                A dense forest in autumn
+                                ```
+                                With "Number of Images" = 2, this generates 6 images total (2 per line).
+                                
+                                **Features:**
+                                - Each line gets its own prompt enhancement (if enabled)
+                                - Seeds increment across all images for variety
+                                - Metadata tracks which line each image came from
+                                - Empty lines are automatically skipped
+                                - Enhanced prompts are NOT returned to the prompt box
+                                
+                                **Use Cases:**
+                                - Batch generate different concepts
+                                - Test variations of similar prompts
+                                - Create themed image sets efficiently
+                                """
+                            )
+                        
+                        with gr.Row():
                             use_refiner = gr.Checkbox(
                                 label="Use Refiner",
                                 value=last_config.get('use_refiner', False) if last_config else False
@@ -993,7 +1077,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                 model_type, enable_dit_offloading, enable_reprompt_offloading, enable_refiner_offloading,
                 prompt, negative_prompt, width, height, num_inference_steps,
                 guidance_scale, seed, use_reprompt, use_refiner, refiner_steps, auto_enhance,
-                num_generations
+                num_generations, multi_line_prompt
             ],
             outputs=[generated_images, generation_status, prompt]  # Return final prompt to prompt box
         )
@@ -1001,7 +1085,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
         enhance_btn.click(
             fn=app.enhance_prompt,
             inputs=[original_prompt, model_type, enable_dit_offloading, 
-                   enable_reprompt_offloading, enable_refiner_offloading, use_reprompt],
+                   enable_reprompt_offloading, enable_refiner_offloading, use_reprompt, auto_enhance],
             outputs=[enhanced_prompt, enhancement_status]
         )
         
@@ -1022,7 +1106,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                 config_name_input, model_type, enable_dit_offloading, enable_reprompt_offloading,
                 enable_refiner_offloading, prompt, negative_prompt, aspect_ratio, width, height,
                 num_inference_steps, guidance_scale, seed, use_reprompt,
-                use_refiner, refiner_steps, auto_enhance, num_generations
+                use_refiner, refiner_steps, auto_enhance, multi_line_prompt, num_generations
             ],
             outputs=[generation_status, config_dropdown]
         )
@@ -1057,6 +1141,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                     params.get('use_refiner', False),
                     params.get('refiner_steps', 4),
                     params.get('auto_enhance', False),
+                    params.get('multi_line_prompt', False),
                     params.get('num_generations', 1),
                     status
                 )
@@ -1064,7 +1149,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                 gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
                 gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
                 gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), 
-                gr.update(), gr.update(), status
+                gr.update(), gr.update(), gr.update(), status
             )
         
         config_dropdown.change(
@@ -1074,7 +1159,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                 model_type, enable_dit_offloading, enable_reprompt_offloading, enable_refiner_offloading,
                 prompt, negative_prompt, aspect_ratio, width, height, num_inference_steps,
                 guidance_scale, seed, use_reprompt, use_refiner, refiner_steps, auto_enhance,
-                num_generations, generation_status
+                multi_line_prompt, num_generations, generation_status
             ]
         )
         
