@@ -740,17 +740,56 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                             value=last_config.get('negative_prompt', "") if last_config else ""
                         )
                         
+                        # Aspect ratio presets
+                        gr.Markdown("### Aspect Ratio Presets")
+                        with gr.Row():
+                            aspect_ratio = gr.Radio(
+                                choices=["Custom", "1:1", "16:9", "9:16", "4:3", "3:4", "21:9", "9:21", "2:3", "3:2"],
+                                value="Custom",
+                                label="Aspect Ratio",
+                                interactive=True
+                            )
+                        
                         with gr.Row():
                             width = gr.Slider(
-                                minimum=512, maximum=2048, step=64,
+                                minimum=512, maximum=3072, step=32,
                                 value=last_config.get('width', 2048) if last_config else 2048,
                                 label="Width"
                             )
                             height = gr.Slider(
-                                minimum=512, maximum=2048, step=64,
+                                minimum=512, maximum=3072, step=32,
                                 value=last_config.get('height', 2048) if last_config else 2048,
                                 label="Height"
                             )
+                        
+                        # Aspect ratio presets (all divisible by 32)
+                        aspect_ratios = {
+                            "1:1": (2048, 2048),    # Square
+                            "16:9": (2560, 1440),   # Widescreen (adjusted from 1536 to 1440 for divisibility)
+                            "9:16": (1440, 2560),   # Portrait widescreen
+                            "4:3": (2304, 1728),    # Classic TV (adjusted from 1792 to 1728)
+                            "3:4": (1728, 2304),    # Portrait classic
+                            "21:9": (2688, 1152),   # Ultrawide
+                            "9:21": (1152, 2688),   # Portrait ultrawide
+                            "2:3": (1664, 2496),    # Portrait photo
+                            "3:2": (2496, 1664),    # Landscape photo
+                        }
+                        
+                        def update_dimensions(aspect):
+                            if aspect in aspect_ratios:
+                                w, h = aspect_ratios[aspect]
+                                return gr.update(value=w), gr.update(value=h)
+                            return gr.update(), gr.update()
+                        
+                        aspect_ratio.change(
+                            fn=update_dimensions,
+                            inputs=[aspect_ratio],
+                            outputs=[width, height]
+                        )
+                        
+                        # Update aspect ratio to Custom when manual sliders are changed
+                        width.change(fn=lambda: "Custom", outputs=[aspect_ratio])
+                        height.change(fn=lambda: "Custom", outputs=[aspect_ratio])
                         
                         with gr.Row():
                             num_inference_steps = gr.Slider(
@@ -893,7 +932,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
             fn=save_and_refresh,
             inputs=[
                 config_name_input, model_type, enable_dit_offloading, enable_reprompt_offloading,
-                enable_refiner_offloading, prompt, negative_prompt, width, height,
+                enable_refiner_offloading, prompt, negative_prompt, aspect_ratio, width, height,
                 num_inference_steps, guidance_scale, seed, use_reprompt,
                 use_refiner, refiner_steps, auto_enhance, num_generations
             ],
@@ -903,6 +942,16 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
         def load_and_update(config_name):
             params, status = app.load_config(config_name)
             if params:
+                # Determine aspect ratio from width/height if not stored
+                stored_aspect = params.get('aspect_ratio', 'Custom')
+                if stored_aspect == 'Custom':
+                    # Check if dimensions match any preset
+                    w, h = params.get('width', 2048), params.get('height', 2048)
+                    for ratio, (preset_w, preset_h) in aspect_ratios.items():
+                        if w == preset_w and h == preset_h:
+                            stored_aspect = ratio
+                            break
+                
                 return (
                     params.get('model_type', 'regular'),
                     params.get('enable_dit_offloading', True),
@@ -910,6 +959,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                     params.get('enable_refiner_offloading', True),
                     params.get('prompt', ''),
                     params.get('negative_prompt', ''),
+                    stored_aspect,
                     params.get('width', 2048),
                     params.get('height', 2048),
                     params.get('num_inference_steps', 50),
@@ -926,7 +976,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                 gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
                 gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
                 gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), 
-                gr.update(), status
+                gr.update(), gr.update(), status
             )
         
         config_dropdown.change(
@@ -934,7 +984,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
             inputs=[config_dropdown],
             outputs=[
                 model_type, enable_dit_offloading, enable_reprompt_offloading, enable_refiner_offloading,
-                prompt, negative_prompt, width, height, num_inference_steps,
+                prompt, negative_prompt, aspect_ratio, width, height, num_inference_steps,
                 guidance_scale, seed, use_reprompt, use_refiner, refiner_steps, auto_enhance,
                 num_generations, generation_status
             ]

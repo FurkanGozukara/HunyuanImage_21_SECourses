@@ -8,7 +8,17 @@ def load_vae(device, vae_path: str = None, vae_precision: str = None):
     config = HunyuanVAE2D.load_config(vae_path)
     vae = HunyuanVAE2D.from_config(config)
 
-    ckpt = torch.load(Path(vae_path) / "pytorch_model.ckpt", map_location='cpu')
+    # Try both .ckpt and .pt extensions
+    ckpt_path = Path(vae_path) / "pytorch_model.ckpt"
+    pt_path = Path(vae_path) / "pytorch_model.pt"
+    
+    if ckpt_path.exists():
+        ckpt = torch.load(ckpt_path, map_location='cpu')
+    elif pt_path.exists():
+        ckpt = torch.load(pt_path, map_location='cpu')
+    else:
+        raise FileNotFoundError(f"No model file found in {vae_path}. Looked for pytorch_model.ckpt and pytorch_model.pt")
+    
     if "state_dict" in ckpt:
         ckpt = ckpt["state_dict"]
     vae_ckpt = {}
@@ -33,7 +43,17 @@ def load_refiner_vae(device, vae_path: str = None, vae_precision: str = "fp16"):
     config = AutoencoderKLConv3D.load_config(vae_path)
     vae = AutoencoderKLConv3D.from_config(config)
 
-    ckpt = torch.load(Path(vae_path) / "pytorch_model.ckpt", map_location='cpu')
+    # Try both .ckpt and .pt extensions
+    ckpt_path = Path(vae_path) / "pytorch_model.ckpt"
+    pt_path = Path(vae_path) / "pytorch_model.pt"
+    
+    if ckpt_path.exists():
+        ckpt = torch.load(ckpt_path, map_location='cpu')
+    elif pt_path.exists():
+        ckpt = torch.load(pt_path, map_location='cpu')
+    else:
+        raise FileNotFoundError(f"No model file found in {vae_path}. Looked for pytorch_model.ckpt and pytorch_model.pt")
+    
     if "state_dict" in ckpt:
         ckpt = ckpt["state_dict"]
     vae_ckpt = {}
