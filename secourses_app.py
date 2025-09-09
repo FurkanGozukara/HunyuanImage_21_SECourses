@@ -989,7 +989,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                         with gr.Row():
                             use_reprompt = gr.Checkbox(
                                 label="Load Reprompt Model",
-                                value=last_config.get('use_reprompt', False) if last_config else False,
+                                value=last_config.get('use_reprompt', True) if last_config else True,
                                 info="Load the reprompt LLM model into memory (required for enhancement features, +7GB VRAM, doesn't auto-enhance)"
                             )
                             auto_enhance = gr.Checkbox(
@@ -1170,7 +1170,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                     params.get('num_inference_steps', 50),
                     params.get('guidance_scale', 3.5),
                     params.get('seed', -1),
-                    params.get('use_reprompt', False),
+                    params.get('use_reprompt', True),
                     params.get('use_refiner', False),
                     params.get('refiner_steps', 4),
                     params.get('auto_enhance', False),
