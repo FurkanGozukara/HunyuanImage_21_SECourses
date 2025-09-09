@@ -1,2 +1,6 @@
 models
 venv
+ckpts
+.claude
+__pycache__/
+*.pyc

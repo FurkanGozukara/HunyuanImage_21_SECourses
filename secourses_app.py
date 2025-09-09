@@ -31,7 +31,7 @@ except ImportError as e:
 
 
 # Configuration
-BASE_DIR = Path('./models')
+BASE_DIR = Path('./ckpts')
 OUTPUTS_DIR = Path('./outputs')
 CONFIGS_DIR = Path('./configs')
 LAST_CONFIG_FILE = CONFIGS_DIR / '_last_config.json'
@@ -306,17 +306,10 @@ class HunyuanImageApp:
         self.device = device
         self.image_saver = ImageSaver()
         self.config_manager = ConfigManager()
+        self.initial_model_type = "distilled" if use_distilled else "regular"
         
-        # Load initial pipeline if auto_load is True with default offloading enabled
-        if auto_load and pipeline is None:
-            pipeline = load_pipeline(
-                use_distilled=use_distilled, 
-                device=device,
-                enable_dit_offloading=True,
-                enable_reprompt_offloading=True,
-                enable_refiner_offloading=True
-            )
-            current_model_type = "distilled" if use_distilled else "regular"
+        # Don't auto-load pipeline anymore - will load on first generation
+        # This allows user to configure VRAM settings before loading
         self.pipeline = pipeline
 
     def print_peak_memory(self):
@@ -374,6 +367,31 @@ class HunyuanImageApp:
                 
         except Exception as e:
             return f"Error updating pipeline: {str(e)}"
+    
+    def ensure_pipeline_loaded(self, model_type: str, enable_dit_offloading: bool, 
+                             enable_reprompt_offloading: bool, enable_refiner_offloading: bool):
+        """Ensure pipeline is loaded with the correct settings."""
+        global pipeline, current_model_type, current_offloading_settings
+        
+        if pipeline is None:
+            # First time loading - use the provided settings
+            print("Loading pipeline for the first time with user-selected VRAM optimizations...")
+            use_distilled = (model_type == "distilled")
+            pipeline = load_pipeline(
+                use_distilled=use_distilled,
+                device=self.device,
+                enable_dit_offloading=enable_dit_offloading,
+                enable_reprompt_offloading=enable_reprompt_offloading,
+                enable_refiner_offloading=enable_refiner_offloading
+            )
+            self.pipeline = pipeline
+            current_model_type = model_type
+            current_offloading_settings = {
+                'dit': enable_dit_offloading,
+                'reprompt': enable_reprompt_offloading,
+                'refiner': enable_refiner_offloading
+            }
+            print(f"✓ Pipeline loaded with user settings")
     
     def generate_single_image(self, 
                             prompt: str,
@@ -496,7 +514,11 @@ class HunyuanImageApp:
                        num_generations: int) -> Tuple[List[Image.Image], str]:
         """Generate multiple images with proper seed handling."""
         try:
-            # Switch model/settings if needed
+            # Ensure pipeline is loaded with user settings on first generation
+            self.ensure_pipeline_loaded(model_type, enable_dit_offloading,
+                                      enable_reprompt_offloading, enable_refiner_offloading)
+            
+            # Switch model/settings if needed (after initial load)
             switch_status = self.switch_model(model_type, enable_dit_offloading, 
                                             enable_reprompt_offloading, enable_refiner_offloading)
             print(switch_status)
@@ -548,10 +570,17 @@ class HunyuanImageApp:
             print(f"✗ {error_msg}")
             return [], error_msg
 
-    def enhance_prompt(self, prompt: str) -> Tuple[str, str]:
+    def enhance_prompt(self, prompt: str, model_type: str = "regular",
+                      enable_dit_offloading: bool = True,
+                      enable_reprompt_offloading: bool = True,
+                      enable_refiner_offloading: bool = True) -> Tuple[str, str]:
         """Enhance a prompt using the reprompt model."""
         try:
             torch.cuda.empty_cache()
+            
+            # Ensure pipeline is loaded with user settings on first use
+            self.ensure_pipeline_loaded(model_type, enable_dit_offloading,
+                                      enable_reprompt_offloading, enable_refiner_offloading)
 
             if self.pipeline is None:
                 return prompt, "Pipeline not loaded. Please try again."
@@ -636,19 +665,15 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
     """
     
     with gr.Blocks(css=css, title="HunyuanImage Pipeline", theme=gr.themes.Soft()) as demo:
-        gr.Markdown(
-            """
-            # 🎨 HunyuanImage 2.1 Pipeline
-            **High-Resolution (2K) Text-to-Image Generation**
-            """,
-            elem_classes="model-info"
-        )
-        
-        with gr.Tabs():
-            # Text-to-Image Generation Tab
+        gr.Markdown("## SECourses HunyuanImage 2.1 Pro V1 : https://www.patreon.com/posts/138531984")
+        with gr.Tabs():           
             with gr.Tab("🖼️ Text-to-Image Generation"):
                 with gr.Row():
                     with gr.Column(scale=1):
+                        with gr.Row():
+                            generate_btn = gr.Button("🎨 Generate Image(s)", variant="primary", size="lg")
+                            open_folder_btn = gr.Button("📁 Open Outputs Folder", variant="secondary")
+                        
                         gr.Markdown("### Generation Settings")
                         
                         # Model selection
@@ -664,6 +689,11 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                         with gr.Accordion("ℹ️ How Model Loading Works", open=False):
                             gr.Markdown(
                                 """
+                                **Deferred Loading:**
+                                - Models are loaded on first generation with your selected VRAM settings
+                                - This ensures optimal memory usage based on your GPU configuration
+                                - Configure these settings BEFORE your first generation
+                                
                                 **Generation Process:**
                                 - **Without Refiner**: Single pass using main model (full inference steps)
                                 - **With Refiner**: Two-stage process:
@@ -698,22 +728,6 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                                 info="Move refiner model to CPU when not in use"
                             )
                         
-                        # Configuration management
-                        with gr.Row():
-                            config_dropdown = gr.Dropdown(
-                                label="Load Configuration",
-                                choices=app.get_config_list(),
-                                interactive=True
-                            )
-                            refresh_btn = gr.Button("🔄", size="sm")
-                        
-                        with gr.Row():
-                            config_name_input = gr.Textbox(
-                                label="Config Name",
-                                placeholder="Enter config name to save"
-                            )
-                            save_config_btn = gr.Button("💾 Save Config", size="sm")
-                        
                         prompt = gr.Textbox(
                             label="Prompt",
                             lines=3,
@@ -729,12 +743,12 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                         with gr.Row():
                             width = gr.Slider(
                                 minimum=512, maximum=2048, step=64,
-                                value=last_config.get('width', 1024) if last_config else 1024,
+                                value=last_config.get('width', 2048) if last_config else 2048,
                                 label="Width"
                             )
                             height = gr.Slider(
                                 minimum=512, maximum=2048, step=64,
-                                value=last_config.get('height', 1024) if last_config else 1024,
+                                value=last_config.get('height', 2048) if last_config else 2048,
                                 label="Height"
                             )
                         
@@ -749,7 +763,24 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                                 value=last_config.get('guidance_scale', 3.5) if last_config else 3.5,
                                 label="Guidance Scale"
                             )
+                    
+                    with gr.Column(scale=1):
+                        gr.Markdown("### Generated Images")
+                        generated_images = gr.Gallery(
+                            label="Generated Images",
+                            show_label=False,
+                            elem_id="gallery",
+                            columns=2,
+                            rows=2,
+                            height=400
+                        )
+                        generation_status = gr.Textbox(
+                            label="Status",
+                            interactive=False,
+                            value="Models will be loaded on first generation with your selected VRAM settings"
+                        )
                         
+                        gr.Markdown("### Generation Controls")
                         with gr.Row():
                             seed = gr.Number(
                                 label="Seed",
@@ -771,37 +802,35 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                                 label="Use Refiner",
                                 value=last_config.get('use_refiner', True) if last_config else True
                             )
+                        
+                        with gr.Row():
                             auto_enhance = gr.Checkbox(
                                 label="Auto Enhance Prompt",
                                 value=last_config.get('auto_enhance', False) if last_config else False
                             )
-                        
-                        with gr.Row():
                             refiner_steps = gr.Slider(
                                 minimum=1, maximum=20, step=1,
                                 value=last_config.get('refiner_steps', 4) if last_config else 4,
                                 label="Refiner Steps",
-                                info="Number of refinement steps (only used when refiner is enabled)"
+                                info="Steps (when refiner enabled)"
                             )
                         
-                        generate_btn = gr.Button("🎨 Generate Image(s)", variant="primary", size="lg")
-                        open_folder_btn = gr.Button("📁 Open Outputs Folder", variant="secondary")
-                    
-                    with gr.Column(scale=1):
-                        gr.Markdown("### Generated Images")
-                        generated_images = gr.Gallery(
-                            label="Generated Images",
-                            show_label=False,
-                            elem_id="gallery",
-                            columns=2,
-                            rows=2,
-                            height=600
-                        )
-                        generation_status = gr.Textbox(
-                            label="Status",
-                            interactive=False,
-                            value="Ready to generate"
-                        )
+                        # Configuration management
+                        gr.Markdown("### Configuration Management")
+                        with gr.Row():
+                            config_dropdown = gr.Dropdown(
+                                label="Load Configuration",
+                                choices=app.get_config_list(),
+                                interactive=True
+                            )
+                            refresh_btn = gr.Button("🔄", size="sm")
+                        
+                        with gr.Row():
+                            config_name_input = gr.Textbox(
+                                label="Config Name",
+                                placeholder="Enter config name to save"
+                            )
+                            save_config_btn = gr.Button("💾 Save Config", size="sm")
             
             # Prompt Enhancement Tab
             with gr.Tab("✨ Prompt Enhancement"):
@@ -844,7 +873,8 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
         
         enhance_btn.click(
             fn=app.enhance_prompt,
-            inputs=[original_prompt],
+            inputs=[original_prompt, model_type, enable_dit_offloading, 
+                   enable_reprompt_offloading, enable_refiner_offloading],
             outputs=[enhanced_prompt, enhancement_status]
         )
         
@@ -880,8 +910,8 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                     params.get('enable_refiner_offloading', True),
                     params.get('prompt', ''),
                     params.get('negative_prompt', ''),
-                    params.get('width', 1024),
-                    params.get('height', 1024),
+                    params.get('width', 2048),
+                    params.get('height', 2048),
                     params.get('num_inference_steps', 50),
                     params.get('guidance_scale', 3.5),
                     params.get('seed', -1),
@@ -946,11 +976,11 @@ if __name__ == "__main__":
     demo = create_interface(auto_load=auto_load, use_distilled=args.use_distilled, device=args.device)
     
     print("🚀 Starting HunyuanImage Gradio App...")
-    print(f"🔧 Auto-load pipeline: {'Yes' if auto_load else 'No'}")
-    print(f"🎯 Initial model type: {'Distilled' if args.use_distilled else 'Regular'}")
+    print(f"🔧 Deferred model loading: Models will be loaded on first use with user-selected VRAM settings")
+    print(f"🎯 Default model type: {'Distilled' if args.use_distilled else 'Regular'}")
     print(f"💻 Device: {args.device}")
     print(f"🌐 Share mode: {'Enabled' if args.share else 'Disabled'}")
-    print("⚠️  Make sure you have the required model checkpoints in the 'models' folder!")
+    print("⚠️  Make sure you have the required model checkpoints in the 'ckpts' folder!")
     
     demo.launch(
         share=args.share,
