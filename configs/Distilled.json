@@ -1,0 +1,23 @@
+{
+  "model_type": "distilled",
+  "enable_dit_offloading": true,
+  "enable_reprompt_offloading": true,
+  "enable_refiner_offloading": true,
+  "prompt": "A beautiful landscape with mountains",
+  "negative_prompt": "blurry, low quality",
+  "aspect_ratio": "1:1",
+  "width": 2048,
+  "height": 2048,
+  "num_inference_steps": 8,
+  "guidance_scale": 3.5,
+  "seed": -1,
+  "use_reprompt": true,
+  "use_refiner": false,
+  "refiner_steps": 4,
+  "auto_enhance": false,
+  "multi_line_prompt": false,
+  "num_generations": 1,
+  "main_shift": 4,
+  "refiner_shift": 1,
+  "refiner_guidance": 3
+}

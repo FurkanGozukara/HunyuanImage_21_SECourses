@@ -794,7 +794,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                             label="Model Type",
                             choices=["regular", "distilled"],
                             value=last_config.get('model_type', 'regular') if last_config else 'regular',
-                            info="Regular: Higher quality | Distilled: Faster generation"
+                            info="Regular: Higher quality (50 steps) | Distilled: Faster generation (8 steps)\nIf you want to change model restart app recommended"
                         )
                         
                         # GPU Memory Optimization Settings
@@ -915,7 +915,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                         
                         with gr.Row():
                             num_inference_steps = gr.Slider(
-                                minimum=10, maximum=100, step=5,
+                                minimum=1, maximum=100, step=1,
                                 value=last_config.get('num_inference_steps', 50) if last_config else 50,
                                 label="Inference Steps"
                             )
@@ -1070,7 +1070,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                                 minimum=0.5, maximum=5.0, step=0.1,
                                 value=last_config.get('refiner_guidance', 1.5) if last_config else 1.5,
                                 label="Refiner Guidance Scale",
-                                info="Lower values (1.0-2.0) work best for refinement to avoid noise"
+                                info="Try different values to find what works best for your images"
                             )
                         
                         # Configuration management
@@ -1151,7 +1151,34 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
         )
         
         # Config management handlers
-        def save_and_refresh(config_name, **params):
+        def save_and_refresh(config_name, model_type, enable_dit_offloading, enable_reprompt_offloading,
+                            enable_refiner_offloading, prompt, negative_prompt, aspect_ratio, width, height,
+                            num_inference_steps, guidance_scale, seed, use_reprompt,
+                            use_refiner, refiner_steps, auto_enhance, multi_line_prompt, num_generations,
+                            main_shift, refiner_shift, refiner_guidance):
+            params = {
+                'model_type': model_type,
+                'enable_dit_offloading': enable_dit_offloading,
+                'enable_reprompt_offloading': enable_reprompt_offloading,
+                'enable_refiner_offloading': enable_refiner_offloading,
+                'prompt': prompt,
+                'negative_prompt': negative_prompt,
+                'aspect_ratio': aspect_ratio,
+                'width': width,
+                'height': height,
+                'num_inference_steps': num_inference_steps,
+                'guidance_scale': guidance_scale,
+                'seed': seed,
+                'use_reprompt': use_reprompt,
+                'use_refiner': use_refiner,
+                'refiner_steps': refiner_steps,
+                'auto_enhance': auto_enhance,
+                'multi_line_prompt': multi_line_prompt,
+                'num_generations': num_generations,
+                'main_shift': main_shift,
+                'refiner_shift': refiner_shift,
+                'refiner_guidance': refiner_guidance
+            }
             status = app.save_config(config_name, **params)
             configs = app.get_config_list()
             return status, gr.update(choices=configs, value=config_name if config_name in configs else None)
