@@ -427,7 +427,9 @@ class HunyuanImageApp:
                             use_reprompt: bool,
                             use_refiner: bool,
                             refiner_steps: int,
-                            auto_enhance: bool) -> Tuple[Optional[Image.Image], Optional[Image.Image], Dict, str]:
+                            auto_enhance: bool,
+                            main_shift: int = 4,
+                            refiner_shift: int = 1) -> Tuple[Optional[Image.Image], Optional[Image.Image], Dict, str]:
         """Generate a single image and return it with metadata and final prompt."""
         torch.cuda.empty_cache()
         
@@ -474,7 +476,9 @@ class HunyuanImageApp:
             'use_reprompt': use_reprompt,
             'use_refiner': use_refiner,
             'refiner_steps': refiner_steps if use_refiner else None,
-            'auto_enhance': auto_enhance
+            'auto_enhance': auto_enhance,
+            'main_shift': main_shift,
+            'refiner_shift': refiner_shift
         }
         
         # Generate image
@@ -489,6 +493,7 @@ class HunyuanImageApp:
                 height=height,
                 num_inference_steps=num_inference_steps,
                 guidance_scale=guidance_scale,
+                shift=main_shift,
                 seed=seed,
                 use_reprompt=actual_use_reprompt and not auto_enhance and has_reprompt,  # Don't double-enhance
                 use_refiner=False
@@ -507,7 +512,7 @@ class HunyuanImageApp:
                 height=height,
                 num_inference_steps=refiner_steps,
                 guidance_scale=guidance_scale,
-                shift=5,
+                shift=refiner_shift,
                 seed=seed
             )
         else:
@@ -518,6 +523,7 @@ class HunyuanImageApp:
                 height=height,
                 num_inference_steps=num_inference_steps,
                 guidance_scale=guidance_scale,
+                shift=main_shift,
                 seed=seed,
                 use_reprompt=actual_use_reprompt and not auto_enhance and has_reprompt,
                 use_refiner=False
@@ -547,7 +553,9 @@ class HunyuanImageApp:
                        refiner_steps: int,
                        auto_enhance: bool,
                        num_generations: int,
-                       multi_line_prompt: bool) -> Tuple[List[str], str, str]:
+                       multi_line_prompt: bool,
+                       main_shift: int = 4,
+                       refiner_shift: int = 1) -> Tuple[List[str], str, str]:
         """Generate multiple images with proper seed handling."""
         try:
             # Ensure pipeline is loaded with user settings on first generation
@@ -607,7 +615,9 @@ class HunyuanImageApp:
                         use_reprompt=use_reprompt,
                         use_refiner=use_refiner,
                         refiner_steps=refiner_steps,
-                        auto_enhance=auto_enhance
+                        auto_enhance=auto_enhance,
+                        main_shift=main_shift,
+                        refiner_shift=refiner_shift
                     )
                     
                     # Update metadata with multi-line info if applicable
@@ -894,6 +904,21 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                                 value=last_config.get('guidance_scale', 3.5) if last_config else 3.5,
                                 label="Guidance Scale"
                             )
+                        
+                        # Shift parameters for timestep scheduling
+                        with gr.Row():
+                            main_shift = gr.Slider(
+                                minimum=1, maximum=10, step=1,
+                                value=last_config.get('main_shift', 4) if last_config else 4,
+                                label="Main Model Shift",
+                                info="Timestep shift for main model (default: 4, higher = more denoising)"
+                            )
+                            refiner_shift = gr.Slider(
+                                minimum=1, maximum=10, step=1,
+                                value=last_config.get('refiner_shift', 1) if last_config else 1,
+                                label="Refiner Shift",
+                                info="Timestep shift for refiner (default: 1, lower = less noise)"
+                            )
                     
                     with gr.Column(scale=1):
                         gr.Markdown("### Generated Images")
@@ -1077,7 +1102,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                 model_type, enable_dit_offloading, enable_reprompt_offloading, enable_refiner_offloading,
                 prompt, negative_prompt, width, height, num_inference_steps,
                 guidance_scale, seed, use_reprompt, use_refiner, refiner_steps, auto_enhance,
-                num_generations, multi_line_prompt
+                num_generations, multi_line_prompt, main_shift, refiner_shift
             ],
             outputs=[generated_images, generation_status, prompt]  # Return final prompt to prompt box
         )
@@ -1106,7 +1131,8 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                 config_name_input, model_type, enable_dit_offloading, enable_reprompt_offloading,
                 enable_refiner_offloading, prompt, negative_prompt, aspect_ratio, width, height,
                 num_inference_steps, guidance_scale, seed, use_reprompt,
-                use_refiner, refiner_steps, auto_enhance, multi_line_prompt, num_generations
+                use_refiner, refiner_steps, auto_enhance, multi_line_prompt, num_generations,
+                main_shift, refiner_shift
             ],
             outputs=[generation_status, config_dropdown]
         )
@@ -1143,13 +1169,15 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                     params.get('auto_enhance', False),
                     params.get('multi_line_prompt', False),
                     params.get('num_generations', 1),
+                    params.get('main_shift', 4),
+                    params.get('refiner_shift', 1),
                     status
                 )
             return (
                 gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
                 gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
                 gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), 
-                gr.update(), gr.update(), gr.update(), status
+                gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), status
             )
         
         config_dropdown.change(
@@ -1159,7 +1187,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                 model_type, enable_dit_offloading, enable_reprompt_offloading, enable_refiner_offloading,
                 prompt, negative_prompt, aspect_ratio, width, height, num_inference_steps,
                 guidance_scale, seed, use_reprompt, use_refiner, refiner_steps, auto_enhance,
-                multi_line_prompt, num_generations, generation_status
+                multi_line_prompt, num_generations, main_shift, refiner_shift, generation_status
             ]
         )
         
