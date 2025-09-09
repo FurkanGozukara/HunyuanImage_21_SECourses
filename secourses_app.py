@@ -925,7 +925,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                         with gr.Row():
                             use_refiner = gr.Checkbox(
                                 label="Use Refiner",
-                                value=last_config.get('use_refiner', True) if last_config else True
+                                value=last_config.get('use_refiner', False) if last_config else False
                             )
                             refiner_steps = gr.Slider(
                                 minimum=1, maximum=20, step=1,
@@ -1054,7 +1054,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                     params.get('guidance_scale', 3.5),
                     params.get('seed', -1),
                     params.get('use_reprompt', False),
-                    params.get('use_refiner', True),
+                    params.get('use_refiner', False),
                     params.get('refiner_steps', 4),
                     params.get('auto_enhance', False),
                     params.get('num_generations', 1),
