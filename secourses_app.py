@@ -97,6 +97,7 @@ class ConfigManager:
     def __init__(self, configs_dir: Path = CONFIGS_DIR):
         self.configs_dir = configs_dir
         self.configs_dir.mkdir(exist_ok=True)
+        self.last_config_name = None
         
     def save_config(self, config_name: str, params: Dict) -> bool:
         """Save configuration to file."""
@@ -105,9 +106,8 @@ class ConfigManager:
             with open(config_path, 'w') as f:
                 json.dump(params, f, indent=2)
             
-            # Save as last used config
-            with open(LAST_CONFIG_FILE, 'w') as f:
-                json.dump(params, f, indent=2)
+            # Save config name as last used
+            self._save_last_config_name(config_name)
             return True
         except Exception as e:
             print(f"Error saving config: {e}")
@@ -121,23 +121,46 @@ class ConfigManager:
                 with open(config_path, 'r') as f:
                     params = json.load(f)
                     
-                # Save as last used config
-                with open(LAST_CONFIG_FILE, 'w') as f:
-                    json.dump(params, f, indent=2)
+                # Save config name as last used
+                self._save_last_config_name(config_name)
                 return params
         except Exception as e:
             print(f"Error loading config: {e}")
         return None
         
-    def load_last_config(self) -> Optional[Dict]:
-        """Load last used configuration."""
+    def _save_last_config_name(self, config_name: str):
+        """Save the name of the last used config."""
+        try:
+            with open(LAST_CONFIG_FILE, 'w') as f:
+                json.dump({"last_config_name": config_name}, f, indent=2)
+            self.last_config_name = config_name
+            print(f"✓ Set last config to: {config_name}")
+        except Exception as e:
+            print(f"Error saving last config name: {e}")
+    
+    def get_last_config_name(self) -> Optional[str]:
+        """Get the name of the last used config."""
         try:
             if LAST_CONFIG_FILE.exists():
                 with open(LAST_CONFIG_FILE, 'r') as f:
-                    return json.load(f)
+                    data = json.load(f)
+                    if isinstance(data, dict) and "last_config_name" in data:
+                        return data["last_config_name"]
         except Exception as e:
-            print(f"Error loading last config: {e}")
+            print(f"Error getting last config name: {e}")
         return None
+        
+    def load_last_config(self) -> Tuple[Optional[Dict], Optional[str]]:
+        """Load last used configuration by name."""
+        config_name = self.get_last_config_name()
+        if config_name:
+            print(f"Loading last used config: {config_name}")
+            params = self.load_config(config_name)
+            if params:
+                return params, config_name
+            else:
+                print(f"Last config '{config_name}' not found")
+        return None, None
         
     def list_configs(self) -> List[str]:
         """List available configurations."""
@@ -885,7 +908,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
     app = HunyuanImageApp(auto_load=auto_load, use_distilled=use_distilled, device=device)
     
     # Load last configuration if available
-    last_config = app.config_manager.load_last_config()
+    last_config, last_config_name = app.config_manager.load_last_config()
     
     # Custom CSS
     css = """
@@ -1204,6 +1227,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                             config_dropdown = gr.Dropdown(
                                 label="Load Configuration",
                                 choices=app.get_config_list(),
+                                value=last_config_name,
                                 interactive=True
                             )
                             refresh_btn = gr.Button("🔄", size="sm")
@@ -1383,6 +1407,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                             refine_config_dropdown = gr.Dropdown(
                                 label="Load Configuration",
                                 choices=app.get_config_list(),
+                                value=last_config_name,
                                 interactive=True
                             )
                             refine_refresh_btn = gr.Button("🔄", size="sm")
