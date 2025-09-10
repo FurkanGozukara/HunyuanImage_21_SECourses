@@ -710,6 +710,131 @@ class HunyuanImageApp:
             error_msg = f"Error enhancing prompt: {str(e)}"
             print(f"✗ {error_msg}")
             return prompt, error_msg
+    
+    def refine_existing_image(self,
+                             model_type: str,
+                             enable_dit_offloading: bool,
+                             enable_reprompt_offloading: bool, 
+                             enable_refiner_offloading: bool,
+                             input_image: Optional[Image.Image],
+                             prompt: str,
+                             negative_prompt: str,
+                             width: int,
+                             height: int,
+                             num_inference_steps: int,
+                             guidance_scale: float,
+                             seed: int,
+                             refiner_shift: int = 1) -> Tuple[Optional[str], str, Dict]:
+        """Refine an existing image using the refiner pipeline."""
+        try:
+            if input_image is None:
+                return None, "Please upload an image to refine.", {}
+            
+            torch.cuda.empty_cache()
+            
+            # Ensure pipeline is loaded with user settings
+            self.ensure_pipeline_loaded(model_type, enable_dit_offloading,
+                                      enable_reprompt_offloading, enable_refiner_offloading,
+                                      False, False)  # Don't need reprompt for refinement
+            
+            if self.pipeline is None:
+                return None, "Pipeline not loaded. Please try again.", {}
+            
+            # Handle image resizing with smart cropping to maintain aspect ratio
+            original_size = input_image.size
+            if original_size != (width, height):
+                # Calculate aspect ratios
+                input_aspect = original_size[0] / original_size[1]
+                target_aspect = width / height
+                
+                # Smart crop and resize to maintain aspect ratio
+                if abs(input_aspect - target_aspect) > 0.01:  # If aspects differ
+                    print(f"📐 Input aspect ratio ({input_aspect:.2f}) differs from target ({target_aspect:.2f})")
+                    print(f"   Using smart center crop to maintain aspect ratio...")
+                    
+                    # Calculate dimensions for center crop
+                    if input_aspect > target_aspect:
+                        # Input is wider - crop width
+                        new_width = int(original_size[1] * target_aspect)
+                        new_height = original_size[1]
+                        left = (original_size[0] - new_width) // 2
+                        top = 0
+                        right = left + new_width
+                        bottom = new_height
+                    else:
+                        # Input is taller - crop height
+                        new_width = original_size[0]
+                        new_height = int(original_size[0] / target_aspect)
+                        left = 0
+                        top = (original_size[1] - new_height) // 2
+                        right = new_width
+                        bottom = top + new_height
+                    
+                    # Crop to target aspect ratio
+                    input_image = input_image.crop((left, top, right, bottom))
+                    print(f"   Cropped from {original_size} to {input_image.size} (center crop)")
+                
+                # Now resize to exact target dimensions
+                if input_image.size != (width, height):
+                    input_image = input_image.resize((width, height), Image.Resampling.LANCZOS)
+                    print(f"   Final resize to ({width}, {height})")
+            
+            # Move main pipeline to CPU, refiner to GPU
+            self.pipeline.to('cpu')
+            # Accessing refiner_pipeline property will load it if not already loaded
+            self.pipeline.refiner_pipeline.to('cuda')
+            
+            # Generate seed if random
+            if seed == -1:
+                seed = random.randint(100000, 999999)
+            
+            # Create metadata for the refined image
+            global current_model_type, current_offloading_settings
+            metadata = {
+                'operation': 'image_refinement',
+                'model_type': current_model_type,
+                'enable_dit_offloading': current_offloading_settings['dit'],
+                'enable_reprompt_offloading': current_offloading_settings['reprompt'],
+                'enable_refiner_offloading': current_offloading_settings['refiner'],
+                'prompt': prompt,
+                'negative_prompt': negative_prompt,
+                'width': width,
+                'height': height,
+                'num_inference_steps': num_inference_steps,
+                'guidance_scale': guidance_scale,
+                'seed': seed,
+                'refiner_shift': refiner_shift,
+                'original_image_size': original_size,
+                'preprocessing': 'center_crop_and_resize' if original_size != (width, height) else 'none',
+                'aspect_ratio_preserved': True
+            }
+            
+            # Apply refiner
+            refined_image = self.pipeline.refiner_pipeline(
+                image=input_image,
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                width=width,
+                height=height,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                shift=refiner_shift,
+                seed=seed
+            )
+            
+            self.print_peak_memory()
+            
+            # Save the refined image
+            path = self.image_saver.save_image(refined_image, metadata)
+            print(f"Saved refined image: {path}")
+            
+            # Return as list for Gallery component
+            return [path], f"Image refined successfully!\nSaved to: {path}", metadata
+            
+        except Exception as e:
+            error_msg = f"Error refining image: {str(e)}"
+            print(f"✗ {error_msg}")
+            return [], error_msg, {}
 
     def open_outputs_folder(self):
         """Open the outputs folder in the system file explorer."""
@@ -1125,6 +1250,193 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                             interactive=False,
                             value="Ready to enhance (requires 'Load Reprompt Model' to be enabled)"
                         )
+            
+            # Image Refinement Tab
+            with gr.Tab("🔧 Image Refinement"):
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        gr.Markdown("### Refinement Settings")
+                        gr.Markdown(
+                            """
+                            **Upload any image to enhance it with the refiner model.**
+                            
+                            The refiner can improve details, quality, and apply your prompt guidance to existing images.
+                            Works best with images generated by HunyuanImage, but can refine any image.
+                            """
+                        )
+                        
+                        with gr.Row():
+                            refine_btn = gr.Button("🔧 Refine Image", variant="primary", size="lg")
+                            refine_open_folder_btn = gr.Button("📁 Open Outputs Folder", variant="secondary")
+                        
+                        input_image = gr.Image(
+                            label="Input Image (Important content should be centered)",
+                            type="pil",
+                            height=300
+                        )
+                        
+                        refine_prompt = gr.Textbox(
+                            label="Refinement Prompt",
+                            placeholder="Describe what you want in the refined image",
+                            lines=3,
+                            value=last_config.get('refine_prompt', "High quality, detailed, sharp focus") if last_config else "High quality, detailed, sharp focus"
+                        )
+                        
+                        refine_negative_prompt = gr.Textbox(
+                            label="Negative Prompt",
+                            placeholder="What to avoid in the refinement",
+                            lines=2,
+                            value=last_config.get('refine_negative_prompt', "") if last_config else ""
+                        )
+                        
+                        # Aspect ratio presets for refinement
+                        gr.Markdown("### Output Dimensions")
+                        with gr.Row():
+                            refine_aspect_ratio = gr.Radio(
+                                choices=["Custom", "1:1", "16:9", "9:16", "4:3", "3:4", "21:9", "9:21", "2:3", "3:2"],
+                                value="Custom",
+                                label="Aspect Ratio",
+                                interactive=True
+                            )
+                        
+                        with gr.Row():
+                            refine_width = gr.Slider(
+                                minimum=512, maximum=3072, step=32,
+                                value=last_config.get('refine_width', 2048) if last_config else 2048,
+                                label="Width"
+                            )
+                            refine_height = gr.Slider(
+                                minimum=512, maximum=3072, step=32,
+                                value=last_config.get('refine_height', 2048) if last_config else 2048,
+                                label="Height"
+                            )
+                        
+                        def update_refine_dimensions(aspect):
+                            if aspect in aspect_ratios:
+                                w, h = aspect_ratios[aspect]
+                                return gr.update(value=w), gr.update(value=h)
+                            return gr.update(), gr.update()
+                        
+                        refine_aspect_ratio.change(
+                            fn=update_refine_dimensions,
+                            inputs=[refine_aspect_ratio],
+                            outputs=[refine_width, refine_height]
+                        )
+                        
+                        # Update aspect ratio to Custom when manual sliders are changed
+                        refine_width.change(fn=lambda: "Custom", outputs=[refine_aspect_ratio])
+                        refine_height.change(fn=lambda: "Custom", outputs=[refine_aspect_ratio])
+                        
+                        with gr.Row():
+                            refine_steps = gr.Slider(
+                                minimum=1, maximum=20, step=1,
+                                value=last_config.get('refine_steps', 4) if last_config else 4,
+                                label="Refinement Steps",
+                                info="More steps = more refinement (default: 4)"
+                            )
+                            refine_guidance = gr.Slider(
+                                minimum=0.5, maximum=5.0, step=0.1,
+                                value=last_config.get('refine_guidance', 1.5) if last_config else 1.5,
+                                label="Guidance Scale",
+                                info="How strongly to follow the prompt"
+                            )
+                        
+                        with gr.Row():
+                            refine_seed = gr.Number(
+                                label="Seed",
+                                value=last_config.get('refine_seed', -1) if last_config else -1,
+                                precision=0,
+                                info="Random seed for reproducibility (-1 for random)"
+                            )
+                            refine_shift = gr.Slider(
+                                minimum=1, maximum=10, step=1,
+                                value=last_config.get('refine_shift', 1) if last_config else 1,
+                                label="Refiner Shift",
+                                info="Timestep shift for refiner (default: 1, lower = less noise)"
+                            )
+                    
+                    with gr.Column(scale=1):
+                        gr.Markdown("### Refined Image")
+                        refined_image_gallery = gr.Gallery(
+                            label="Refined Image",
+                            show_label=False,
+                            elem_id="refined_gallery",
+                            columns=1,
+                            rows=1,
+                            height=400
+                        )
+                        refinement_status = gr.Textbox(
+                            label="Status",
+                            interactive=False,
+                            value="Ready to refine"
+                        )
+                        
+                        # Configuration management for refinement
+                        gr.Markdown("### Refinement Config Management")
+                        with gr.Row():
+                            refine_config_dropdown = gr.Dropdown(
+                                label="Load Configuration",
+                                choices=app.get_config_list(),
+                                interactive=True
+                            )
+                            refine_refresh_btn = gr.Button("🔄", size="sm")
+                        
+                        with gr.Row():
+                            refine_config_name_input = gr.Textbox(
+                                label="Config Name",
+                                placeholder="Enter config name to save"
+                            )
+                            refine_save_config_btn = gr.Button("💾 Save Config", size="sm")
+                        
+                        gr.Markdown("### Refinement Info")
+                        with gr.Accordion("📐 How Image Resizing Works", open=False):
+                            gr.Markdown(
+                                """
+                                **Smart Aspect Ratio Handling:**
+                                
+                                When your input image aspect ratio doesn't match the output dimensions:
+                                1. **Center Crop**: The image is automatically center-cropped to match the target aspect ratio
+                                2. **Resize**: Then scaled to the exact output dimensions
+                                3. **No Distortion**: Your image won't be stretched or squashed
+                                
+                                **Example:**
+                                - Input: 1920×1080 (16:9) → Output: 1024×1024 (1:1)
+                                - Process: Centers and crops to 1080×1080, then resizes to 1024×1024
+                                
+                                **Tips:**
+                                - Use aspect ratio presets that match your input for no cropping
+                                - Important content should be centered in your image
+                                - Check the console for details about cropping applied
+                                """
+                            )
+                        
+                        with gr.Accordion("ℹ️ How Image Refinement Works", open=False):
+                            gr.Markdown(
+                                """
+                                **The Refiner Model:**
+                                - Specialized model for enhancing image quality and details
+                                - Can be applied to any image, not just generated ones
+                                - Uses your prompt to guide the refinement process
+                                - Typically uses fewer steps than generation (4 steps default)
+                                
+                                **Best Practices:**
+                                - **For generated images**: Use to add final polish and details
+                                - **For photos/artwork**: Enhance quality while preserving style
+                                - **Prompt guidance**: Describe desired improvements clearly
+                                - **Steps**: 4 steps usually sufficient, more for stronger changes
+                                - **Guidance scale**: Lower values (1-2) preserve original more
+                                
+                                **Memory Usage:**
+                                - Refiner is loaded on-demand when first used
+                                - With offloading enabled, swaps with main model automatically
+                                - Adds ~4-6GB VRAM when active
+                                
+                                **Output:**
+                                - Refined images are saved to the outputs folder
+                                - Metadata includes all refinement parameters
+                                - Original image is preserved (not overwritten)
+                                """
+                            )
         
         # Event handlers
         generate_btn.click(
@@ -1148,6 +1460,22 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
         open_folder_btn.click(
             fn=app.open_outputs_folder,
             outputs=[generation_status]
+        )
+        
+        # Image Refinement Event Handlers
+        refine_btn.click(
+            fn=app.refine_existing_image,
+            inputs=[
+                model_type, enable_dit_offloading, enable_reprompt_offloading, enable_refiner_offloading,
+                input_image, refine_prompt, refine_negative_prompt, refine_width, refine_height,
+                refine_steps, refine_guidance, refine_seed, refine_shift
+            ],
+            outputs=[refined_image_gallery, refinement_status, gr.State()]  # Using State for metadata
+        )
+        
+        refine_open_folder_btn.click(
+            fn=app.open_outputs_folder,
+            outputs=[refinement_status]
         )
         
         # Config management handlers
@@ -1255,6 +1583,67 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
             outputs=[config_dropdown]
         )
         
+        # Refinement config management handlers
+        def save_refine_config_and_refresh(config_name, refine_prompt, refine_negative_prompt, 
+                                          refine_width, refine_height, refine_steps, 
+                                          refine_guidance, refine_seed, refine_shift):
+            params = {
+                'refine_prompt': refine_prompt,
+                'refine_negative_prompt': refine_negative_prompt,
+                'refine_width': refine_width,
+                'refine_height': refine_height,
+                'refine_steps': refine_steps,
+                'refine_guidance': refine_guidance,
+                'refine_seed': refine_seed,
+                'refine_shift': refine_shift
+            }
+            status = app.save_config(config_name, **params)
+            configs = app.get_config_list()
+            return status, gr.update(choices=configs, value=config_name if config_name in configs else None)
+        
+        refine_save_config_btn.click(
+            fn=save_refine_config_and_refresh,
+            inputs=[
+                refine_config_name_input, refine_prompt, refine_negative_prompt,
+                refine_width, refine_height, refine_steps, refine_guidance, 
+                refine_seed, refine_shift
+            ],
+            outputs=[refinement_status, refine_config_dropdown]
+        )
+        
+        def load_refine_config(config_name):
+            params, status = app.load_config(config_name)
+            if params:
+                return (
+                    params.get('refine_prompt', 'High quality, detailed, sharp focus'),
+                    params.get('refine_negative_prompt', ''),
+                    params.get('refine_width', 2048),
+                    params.get('refine_height', 2048),
+                    params.get('refine_steps', 4),
+                    params.get('refine_guidance', 1.5),
+                    params.get('refine_seed', -1),
+                    params.get('refine_shift', 1),
+                    status
+                )
+            return (
+                gr.update(), gr.update(), gr.update(), gr.update(),
+                gr.update(), gr.update(), gr.update(), gr.update(), status
+            )
+        
+        refine_config_dropdown.change(
+            fn=load_refine_config,
+            inputs=[refine_config_dropdown],
+            outputs=[
+                refine_prompt, refine_negative_prompt, refine_width, refine_height,
+                refine_steps, refine_guidance, refine_seed, refine_shift, refinement_status
+            ]
+        )
+        
+        refine_refresh_btn.click(
+            fn=lambda: gr.update(choices=app.get_config_list()),
+            outputs=[refine_config_dropdown]
+        )
+        
         gr.Markdown(
             """
             ### 📝 Features
@@ -1265,6 +1654,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
               - Optional reprompt model loading (saves 7GB VRAM when disabled)
               - Separate control: Load model vs Auto-enhance
               - Manual enhancement tab for testing and refinement
+            - **Image Refinement**: Standalone tab to refine any image with custom prompts
             - **Pre-refiner Images**: Saves both refined and pre-refined versions
             - **GPU Memory Optimization**: Configurable model offloading to reduce VRAM usage
             
