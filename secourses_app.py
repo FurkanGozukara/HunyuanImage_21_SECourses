@@ -14,6 +14,15 @@ import torch
 
 warnings.filterwarnings("ignore")
 
+def get_gpu_memory_gb():
+    """Get available GPU memory in GB."""
+    if torch.cuda.is_available():
+        try:
+            return torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        except:
+            return 0
+    return 0
+
 # Add the current directory to Python path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -278,24 +287,41 @@ def load_pipeline(use_distilled: bool = False,
                  device: str = "cuda",
                  enable_dit_offloading: bool = True,
                  enable_reprompt_offloading: bool = True,
-                 enable_refiner_offloading: bool = True):
-    """Load the HunyuanImage pipeline with configurable offloading."""
+                 enable_refiner_offloading: bool = True,
+                 use_compile: bool = False):
+    """Load the HunyuanImage pipeline with configurable offloading and compilation."""
     try:
         print(f"Loading HunyuanImage pipeline (distilled={use_distilled})...")
         print(f"  DiT offloading: {enable_dit_offloading}")
         print(f"  Reprompt offloading: {enable_reprompt_offloading}")
         print(f"  Refiner offloading: {enable_refiner_offloading}")
+        print(f"  Model compilation: {use_compile}")
+        if use_compile:
+            print("  ⚠️  WARNING: First generation with compilation will be VERY slow (5-10min)")
+            print("     Subsequent runs will be faster. Requires PyTorch 2.0+, CUDA 11.7+")
         
         # Set model root to our models directory
         os.environ['HUNYUANIMAGE_V2_1_MODEL_ROOT'] = str(BASE_DIR)
         
         model_name = "hunyuanimage-v2.1-distilled" if use_distilled else "hunyuanimage-v2.1"
+        
+        # Check VRAM and provide guidance
+        vram_gb = get_gpu_memory_gb()
+        if vram_gb > 0:
+            print(f"📊 VRAM detected: {vram_gb:.1f}GB")
+            if vram_gb < 12 and not enable_dit_offloading:
+                print(f"⚠️  Low VRAM with offloading disabled - strongly recommend enabling offloading")
+        
+        # Keep the original device logic - let offloading handle the memory management
+        # The offloading parameters will automatically move models between CPU/GPU as needed
         pipeline = HunyuanImagePipeline.from_pretrained(
             model_name=model_name,
-            device=device,
+            torch_dtype="bf16",  # Use bf16 as the original model is in bf16
+            device=device,  # Keep original device parameter
             enable_dit_offloading=enable_dit_offloading,
             enable_reprompt_model_offloading=enable_reprompt_offloading,
-            enable_refiner_offloading=enable_refiner_offloading
+            enable_refiner_offloading=enable_refiner_offloading,
+            use_compile=use_compile
         )
         pipeline.to('cpu')
         
@@ -318,7 +344,8 @@ current_model_type = None
 current_offloading_settings = {
     'dit': True,
     'reprompt': True,
-    'refiner': True
+    'refiner': True,
+    'compile': False
 }
 current_reprompt_loaded = False
 
@@ -344,19 +371,19 @@ class HunyuanImageApp:
 
     def switch_model(self, model_type: str, enable_dit_offloading: bool, 
                     enable_reprompt_offloading: bool, enable_refiner_offloading: bool,
-                    use_reprompt: bool, auto_enhance: bool) -> str:
+                    use_reprompt: bool, auto_enhance: bool, use_compile: bool = False) -> str:
         """Switch between models and update offloading settings."""
         global pipeline, current_model_type, current_offloading_settings, current_reprompt_loaded
         
         try:
             use_distilled = (model_type == "distilled")
             
-            # Only check for DiT offloading changes that require pipeline reload
-            # Reprompt and Refiner changes do NOT require pipeline reload
+            # Check for changes that require pipeline reload
             dit_offloading_changed = current_offloading_settings['dit'] != enable_dit_offloading
+            compile_changed = current_offloading_settings.get('compile', False) != use_compile
             
-            # Check if we need to reload the entire pipeline (only for model type or DiT offloading)
-            if current_model_type != model_type or dit_offloading_changed:
+            # Check if we need to reload the entire pipeline
+            if current_model_type != model_type or dit_offloading_changed or compile_changed:
                 print(f"Reloading pipeline with new settings...")
                 print(f"  Model: {model_type}")
                 print(f"  DiT offloading: {enable_dit_offloading}")
@@ -372,14 +399,16 @@ class HunyuanImageApp:
                     device=self.device,
                     enable_dit_offloading=enable_dit_offloading,
                     enable_reprompt_offloading=enable_reprompt_offloading,
-                    enable_refiner_offloading=enable_refiner_offloading
+                    enable_refiner_offloading=enable_refiner_offloading,
+                    use_compile=use_compile
                 )
                 self.pipeline = pipeline
                 current_model_type = model_type
                 current_offloading_settings = {
                     'dit': enable_dit_offloading,
                     'reprompt': enable_reprompt_offloading,
-                    'refiner': enable_refiner_offloading
+                    'refiner': enable_refiner_offloading,
+                    'compile': use_compile
                 }
                 current_reprompt_loaded = False  # Reset reprompt state after pipeline reload
                 
@@ -403,7 +432,7 @@ class HunyuanImageApp:
     
     def ensure_pipeline_loaded(self, model_type: str, enable_dit_offloading: bool, 
                              enable_reprompt_offloading: bool, enable_refiner_offloading: bool,
-                             use_reprompt: bool, auto_enhance: bool = False):
+                             use_reprompt: bool, auto_enhance: bool = False, use_compile: bool = False):
         """Ensure pipeline is loaded with the correct settings."""
         global pipeline, current_model_type, current_offloading_settings, current_reprompt_loaded
         
@@ -416,14 +445,16 @@ class HunyuanImageApp:
                 device=self.device,
                 enable_dit_offloading=enable_dit_offloading,
                 enable_reprompt_offloading=enable_reprompt_offloading,
-                enable_refiner_offloading=enable_refiner_offloading
+                enable_refiner_offloading=enable_refiner_offloading,
+                use_compile=use_compile
             )
             self.pipeline = pipeline
             current_model_type = model_type
             current_offloading_settings = {
                 'dit': enable_dit_offloading,
                 'reprompt': enable_reprompt_offloading,
-                'refiner': enable_refiner_offloading
+                'refiner': enable_refiner_offloading,
+                'compile': use_compile
             }
             current_reprompt_loaded = False
             print(f"✓ Pipeline loaded with user settings")
@@ -582,6 +613,7 @@ class HunyuanImageApp:
                        enable_dit_offloading: bool,
                        enable_reprompt_offloading: bool,
                        enable_refiner_offloading: bool,
+                       use_compile: bool,
                        prompt: str,
                        negative_prompt: str,
                        width: int,
@@ -603,12 +635,12 @@ class HunyuanImageApp:
             # Ensure pipeline is loaded with user settings on first generation
             self.ensure_pipeline_loaded(model_type, enable_dit_offloading,
                                       enable_reprompt_offloading, enable_refiner_offloading,
-                                      use_reprompt, auto_enhance)
+                                      use_reprompt, auto_enhance, use_compile)
             
             # Switch model/settings if needed (after initial load)
             switch_status = self.switch_model(model_type, enable_dit_offloading, 
                                             enable_reprompt_offloading, enable_refiner_offloading,
-                                            use_reprompt, auto_enhance)
+                                            use_reprompt, auto_enhance, use_compile)
             print(switch_status)
             
             if self.pipeline is None:
@@ -701,6 +733,7 @@ class HunyuanImageApp:
                       enable_dit_offloading: bool = True,
                       enable_reprompt_offloading: bool = True,
                       enable_refiner_offloading: bool = True,
+                      use_compile: bool = False,
                       use_reprompt: bool = False,
                       auto_enhance: bool = False) -> Tuple[str, str]:
         """Enhance a prompt using the reprompt model."""
@@ -710,7 +743,7 @@ class HunyuanImageApp:
             # Ensure pipeline is loaded with user settings on first use
             self.ensure_pipeline_loaded(model_type, enable_dit_offloading,
                                       enable_reprompt_offloading, enable_refiner_offloading,
-                                      use_reprompt, auto_enhance)
+                                      use_reprompt, auto_enhance, use_compile)
 
             if self.pipeline is None:
                 return prompt, "Pipeline not loaded. Please try again."
@@ -739,6 +772,7 @@ class HunyuanImageApp:
                              enable_dit_offloading: bool,
                              enable_reprompt_offloading: bool, 
                              enable_refiner_offloading: bool,
+                             use_compile: bool,
                              input_image: Optional[Image.Image],
                              prompt: str,
                              negative_prompt: str,
@@ -747,21 +781,24 @@ class HunyuanImageApp:
                              num_inference_steps: int,
                              guidance_scale: float,
                              seed: int,
-                             refiner_shift: int = 1) -> Tuple[Optional[str], str, Dict]:
+                             refiner_shift: int = 1) -> Tuple[List[str], str, Dict]:
         """Refine an existing image using the refiner pipeline."""
         try:
             if input_image is None:
-                return None, "Please upload an image to refine.", {}
+                return [], "Please upload an image to refine.", {}
             
             torch.cuda.empty_cache()
             
             # Ensure pipeline is loaded with user settings
             self.ensure_pipeline_loaded(model_type, enable_dit_offloading,
                                       enable_reprompt_offloading, enable_refiner_offloading,
-                                      False, False)  # Don't need reprompt for refinement
+                                      False, False, use_compile)  # Don't need reprompt for refinement
             
             if self.pipeline is None:
-                return None, "Pipeline not loaded. Please try again.", {}
+                return [], "Pipeline not loaded. Please try again.", {}
+            
+            # Store the original image for saving
+            original_image_to_save = input_image.copy()
             
             # Handle image resizing with smart cropping to maintain aspect ratio
             original_size = input_image.size
@@ -802,6 +839,9 @@ class HunyuanImageApp:
                     input_image = input_image.resize((width, height), Image.Resampling.LANCZOS)
                     print(f"   Final resize to ({width}, {height})")
             
+            # Also prepare the processed (cropped/resized) version for saving
+            processed_image_to_save = input_image.copy()
+            
             # Move main pipeline to CPU, refiner to GPU
             self.pipeline.to('cpu')
             # Accessing refiner_pipeline property will load it if not already loaded
@@ -811,9 +851,9 @@ class HunyuanImageApp:
             if seed == -1:
                 seed = random.randint(100000, 999999)
             
-            # Create metadata for the refined image
+            # Create metadata for the images
             global current_model_type, current_offloading_settings
-            metadata = {
+            base_metadata = {
                 'operation': 'image_refinement',
                 'model_type': current_model_type,
                 'enable_dit_offloading': current_offloading_settings['dit'],
@@ -832,6 +872,13 @@ class HunyuanImageApp:
                 'aspect_ratio_preserved': True
             }
             
+            # Save the pre-refinement processed image
+            pre_metadata = base_metadata.copy()
+            pre_metadata['stage'] = 'pre_refinement'
+            pre_metadata['description'] = 'Processed input image before refinement'
+            pre_path = self.image_saver.save_image(processed_image_to_save, pre_metadata, is_pre_refiner=True)
+            print(f"Saved pre-refinement image: {pre_path}")
+            
             # Apply refiner
             refined_image = self.pipeline.refiner_pipeline(
                 image=input_image,
@@ -848,11 +895,19 @@ class HunyuanImageApp:
             self.print_peak_memory()
             
             # Save the refined image
-            path = self.image_saver.save_image(refined_image, metadata)
-            print(f"Saved refined image: {path}")
+            refined_metadata = base_metadata.copy()
+            refined_metadata['stage'] = 'refined'
+            refined_metadata['description'] = 'Refined output image'
+            refined_path = self.image_saver.save_image(refined_image, refined_metadata)
+            print(f"Saved refined image: {refined_path}")
             
-            # Return as list for Gallery component
-            return [path], f"Image refined successfully!\nSaved to: {path}", metadata
+            # Return both images for Gallery component
+            gallery_paths = [pre_path, refined_path]
+            status_msg = (f"Images saved successfully!\n"
+                         f"Pre-refinement: {pre_path}\n"
+                         f"Refined: {refined_path}")
+            
+            return gallery_paths, status_msg, base_metadata
             
         except Exception as e:
             error_msg = f"Error refining image: {str(e)}"
@@ -926,7 +981,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
     """
     
     with gr.Blocks(css=css, title="HunyuanImage Pipeline", theme=gr.themes.Soft()) as demo:
-        gr.Markdown("## SECourses HunyuanImage 2.1 Pro V2 : https://www.patreon.com/posts/138531984")
+        gr.Markdown("## SECourses HunyuanImage 2.1 Pro V3 : https://www.patreon.com/posts/138531984")
         with gr.Tabs():           
             with gr.Tab("🖼️ Text-to-Image Generation"):
                 with gr.Row():
@@ -946,7 +1001,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                         )
                         
                         # GPU Memory Optimization Settings
-                        gr.Markdown("### GPU Memory Optimization")
+                        gr.Markdown("### GPU Memory & Performance Optimization")
                         with gr.Accordion("ℹ️ How Model Loading Works", open=False):
                             gr.Markdown(
                                 """
@@ -995,6 +1050,13 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                                 label="Refiner Offloading",
                                 value=last_config.get('enable_refiner_offloading', True) if last_config else True,
                                 info="Move refiner model to CPU when not in use"
+                            )
+                        
+                        with gr.Row():
+                            use_compile = gr.Checkbox(
+                                label="Enable Model Compilation (Experimental)",
+                                value=last_config.get('use_compile', False) if last_config else False,
+                                info="⚠️ EXPERIMENTAL: Compile with torch.compile - First run will be MUCH slower (5-10min compilation), requires PyTorch 2.0+, CUDA 11.7+, and extra VRAM. May not work on all systems."
                             )
                         
                         prompt = gr.Textbox(
@@ -1386,12 +1448,12 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                             )
                     
                     with gr.Column(scale=1):
-                        gr.Markdown("### Refined Image")
+                        gr.Markdown("### Refinement Results")
                         refined_image_gallery = gr.Gallery(
-                            label="Refined Image",
-                            show_label=False,
+                            label="Before & After Refinement",
+                            show_label=True,
                             elem_id="refined_gallery",
-                            columns=1,
+                            columns=2,
                             rows=1,
                             height=400
                         )
@@ -1463,9 +1525,12 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                                 - Adds ~4-6GB VRAM when active
                                 
                                 **Output:**
-                                - Refined images are saved to the outputs folder
-                                - Metadata includes all refinement parameters
-                                - Original image is preserved (not overwritten)
+                                - **Two images are saved and displayed:**
+                                  - Left: Pre-refinement (processed/resized input)
+                                  - Right: Post-refinement (enhanced result)
+                                - Both images saved to outputs folder with metadata
+                                - Pre-refinement image has "_pre_refiner" suffix
+                                - Original input image is preserved (not overwritten)
                                 """
                             )
         
@@ -1524,7 +1589,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
             fn=app.generate_images,
             inputs=[
                 model_type, enable_dit_offloading, enable_reprompt_offloading, enable_refiner_offloading,
-                prompt, negative_prompt, width, height, num_inference_steps,
+                use_compile, prompt, negative_prompt, width, height, num_inference_steps,
                 guidance_scale, seed, use_reprompt, use_refiner, refiner_steps, auto_enhance,
                 num_generations, multi_line_prompt, main_shift, refiner_shift, refiner_guidance
             ],
@@ -1534,7 +1599,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
         enhance_btn.click(
             fn=app.enhance_prompt,
             inputs=[original_prompt, model_type, enable_dit_offloading, 
-                   enable_reprompt_offloading, enable_refiner_offloading, use_reprompt, auto_enhance],
+                   enable_reprompt_offloading, enable_refiner_offloading, use_compile, use_reprompt, auto_enhance],
             outputs=[enhanced_prompt, enhancement_status]
         )
         
@@ -1548,7 +1613,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
             fn=app.refine_existing_image,
             inputs=[
                 model_type, enable_dit_offloading, enable_reprompt_offloading, enable_refiner_offloading,
-                input_image, refine_prompt, refine_negative_prompt, refine_width, refine_height,
+                use_compile, input_image, refine_prompt, refine_negative_prompt, refine_width, refine_height,
                 refine_steps, refine_guidance, refine_seed, refine_shift
             ],
             outputs=[refined_image_gallery, refinement_status, gr.State()]  # Using State for metadata
@@ -1575,7 +1640,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
         
         # Config management handlers
         def save_and_refresh(config_name, model_type, enable_dit_offloading, enable_reprompt_offloading,
-                            enable_refiner_offloading, prompt, negative_prompt, aspect_ratio, width, height,
+                            enable_refiner_offloading, use_compile, prompt, negative_prompt, aspect_ratio, width, height,
                             num_inference_steps, guidance_scale, seed, use_reprompt,
                             use_refiner, refiner_steps, auto_enhance, multi_line_prompt, num_generations,
                             main_shift, refiner_shift, refiner_guidance):
@@ -1584,6 +1649,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                 'enable_dit_offloading': enable_dit_offloading,
                 'enable_reprompt_offloading': enable_reprompt_offloading,
                 'enable_refiner_offloading': enable_refiner_offloading,
+                'use_compile': use_compile,
                 'prompt': prompt,
                 'negative_prompt': negative_prompt,
                 'aspect_ratio': aspect_ratio,
@@ -1610,7 +1676,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
             fn=save_and_refresh,
             inputs=[
                 config_name_input, model_type, enable_dit_offloading, enable_reprompt_offloading,
-                enable_refiner_offloading, prompt, negative_prompt, aspect_ratio, width, height,
+                enable_refiner_offloading, use_compile, prompt, negative_prompt, aspect_ratio, width, height,
                 num_inference_steps, guidance_scale, seed, use_reprompt,
                 use_refiner, refiner_steps, auto_enhance, multi_line_prompt, num_generations,
                 main_shift, refiner_shift, refiner_guidance
@@ -1636,6 +1702,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                     params.get('enable_dit_offloading', True),
                     params.get('enable_reprompt_offloading', True),
                     params.get('enable_refiner_offloading', True),
+                    params.get('use_compile', False),
                     params.get('prompt', ''),
                     params.get('negative_prompt', ''),
                     stored_aspect,
@@ -1656,10 +1723,10 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                     status
                 )
             return (
-                gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
-                gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
-                gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), 
-                gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), status
+                gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+                gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+                gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), 
+                gr.update(), gr.update(), gr.update(), gr.update(), status
             )
         
         config_dropdown.change(
@@ -1667,7 +1734,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
             inputs=[config_dropdown],
             outputs=[
                 model_type, enable_dit_offloading, enable_reprompt_offloading, enable_refiner_offloading,
-                prompt, negative_prompt, aspect_ratio, width, height, num_inference_steps,
+                use_compile, prompt, negative_prompt, aspect_ratio, width, height, num_inference_steps,
                 guidance_scale, seed, use_reprompt, use_refiner, refiner_steps, auto_enhance,
                 multi_line_prompt, num_generations, main_shift, refiner_shift, refiner_guidance, generation_status
             ]
