@@ -320,9 +320,13 @@ def load_pipeline(use_distilled: bool = False,
             device=device,  # Keep original device parameter
             enable_dit_offloading=enable_dit_offloading,
             enable_reprompt_model_offloading=enable_reprompt_offloading,
-            enable_refiner_offloading=enable_refiner_offloading,
-            use_compile=use_compile
+            enable_refiner_offloading=enable_refiner_offloading
         )
+        
+        # Note: use_compile parameter not supported in current version
+        # Keeping the UI option for future compatibility
+        if use_compile:
+            print("  ℹ️  Note: Model compilation requested but not supported in current pipeline version")
         pipeline.to('cpu')
         
         # Don't set reprompt flag here - it will be set dynamically
@@ -1054,9 +1058,9 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                         
                         with gr.Row():
                             use_compile = gr.Checkbox(
-                                label="Enable Model Compilation (Experimental)",
+                                label="Enable Model Compilation (Future Feature)",
                                 value=last_config.get('use_compile', False) if last_config else False,
-                                info="⚠️ EXPERIMENTAL: Compile with torch.compile - First run will be MUCH slower (5-10min compilation), requires PyTorch 2.0+, CUDA 11.7+, and extra VRAM. May not work on all systems."
+                                info="📌 Reserved for future updates - Not yet supported in current pipeline version. Will enable torch.compile when available."
                             )
                         
                         prompt = gr.Textbox(
