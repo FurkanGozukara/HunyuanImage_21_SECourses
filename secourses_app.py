@@ -657,8 +657,13 @@ class HunyuanImageApp:
             # Handle multi-line prompt mode
             prompts_to_process = []
             if multi_line_prompt:
-                # Split by lines and filter out empty lines
-                lines = [line.strip() for line in prompt.split('\n') if line.strip()]
+                # Split by lines, trim each line, and filter out lines with less than 2 characters
+                lines = []
+                for line in prompt.split('\n'):
+                    trimmed_line = line.strip()
+                    if len(trimmed_line) >= 2:  # Skip lines with less than 2 characters
+                        lines.append(trimmed_line)
+                
                 if lines:
                     prompts_to_process = lines
                 else:
@@ -985,7 +990,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
     """
     
     with gr.Blocks(css=css, title="HunyuanImage Pipeline", theme=gr.themes.Soft()) as demo:
-        gr.Markdown("## SECourses HunyuanImage 2.1 Pro V3 : https://www.patreon.com/posts/138531984")
+        gr.Markdown("## SECourses HunyuanImage 2.1 Pro V4 : https://www.patreon.com/posts/138531984")
         with gr.Tabs():           
             with gr.Tab("🖼️ Text-to-Image Generation"):
                 with gr.Row():
