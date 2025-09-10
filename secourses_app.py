@@ -903,7 +903,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
     """
     
     with gr.Blocks(css=css, title="HunyuanImage Pipeline", theme=gr.themes.Soft()) as demo:
-        gr.Markdown("## SECourses HunyuanImage 2.1 Pro V1 : https://www.patreon.com/posts/138531984")
+        gr.Markdown("## SECourses HunyuanImage 2.1 Pro V2 : https://www.patreon.com/posts/138531984")
         with gr.Tabs():           
             with gr.Tab("🖼️ Text-to-Image Generation"):
                 with gr.Row():
@@ -1269,8 +1269,14 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                             refine_btn = gr.Button("🔧 Refine Image", variant="primary", size="lg")
                             refine_open_folder_btn = gr.Button("📁 Open Outputs Folder", variant="secondary")
                         
+                        auto_aspect_ratio = gr.Checkbox(
+                            label="Auto-detect aspect ratio",
+                            value=last_config.get('auto_aspect_ratio', True) if last_config else True,
+                            info="Automatically set output dimensions to match input image aspect ratio"
+                        )
+                        
                         input_image = gr.Image(
-                            label="Input Image (Important content should be centered)",
+                            label="Input Image",
                             type="pil",
                             height=300
                         )
@@ -1438,6 +1444,56 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                                 """
                             )
         
+        # Function to auto-detect and set closest aspect ratio for refinement
+        def auto_detect_aspect_ratio(image, auto_detect_enabled):
+            """Detect input image aspect ratio and set closest matching output dimensions."""
+            if not auto_detect_enabled or image is None:
+                return gr.update(), gr.update(), gr.update()
+            
+            # Get input image dimensions
+            width, height = image.size
+            input_aspect = width / height
+            
+            # Find closest matching aspect ratio from presets
+            closest_ratio = "Custom"
+            min_diff = float('inf')
+            
+            for ratio_name, (preset_w, preset_h) in aspect_ratios.items():
+                preset_aspect = preset_w / preset_h
+                diff = abs(input_aspect - preset_aspect)
+                if diff < min_diff:
+                    min_diff = diff
+                    closest_ratio = ratio_name
+                    closest_width = preset_w
+                    closest_height = preset_h
+            
+            # If very close to a preset (within 5%), use it exactly
+            if min_diff < 0.05:
+                print(f"🎯 Auto-detected aspect ratio: {closest_ratio} ({closest_width}×{closest_height})")
+                return gr.update(value=closest_ratio), gr.update(value=closest_width), gr.update(value=closest_height)
+            else:
+                # Calculate custom dimensions that match input aspect exactly
+                # Use common resolutions as base
+                if width > height:  # Landscape
+                    if width >= 2048:
+                        new_width = 2560 if input_aspect > 1.5 else 2048
+                    else:
+                        new_width = 1920 if input_aspect > 1.5 else 1536
+                    new_height = round(new_width / input_aspect / 32) * 32  # Round to nearest 32
+                else:  # Portrait or square
+                    if height >= 2048:
+                        new_height = 2560 if input_aspect < 0.67 else 2048
+                    else:
+                        new_height = 1920 if input_aspect < 0.67 else 1536
+                    new_width = round(new_height * input_aspect / 32) * 32  # Round to nearest 32
+                
+                # Clamp to valid range
+                new_width = max(512, min(3072, new_width))
+                new_height = max(512, min(3072, new_height))
+                
+                print(f"🎯 Auto-detected custom dimensions: {new_width}×{new_height} (aspect ratio: {input_aspect:.2f})")
+                return gr.update(value="Custom"), gr.update(value=new_width), gr.update(value=new_height)
+        
         # Event handlers
         generate_btn.click(
             fn=app.generate_images,
@@ -1476,6 +1532,20 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
         refine_open_folder_btn.click(
             fn=app.open_outputs_folder,
             outputs=[refinement_status]
+        )
+        
+        # Auto-detect aspect ratio when image is uploaded
+        input_image.change(
+            fn=auto_detect_aspect_ratio,
+            inputs=[input_image, auto_aspect_ratio],
+            outputs=[refine_aspect_ratio, refine_width, refine_height]
+        )
+        
+        # Also trigger when checkbox is toggled
+        auto_aspect_ratio.change(
+            fn=auto_detect_aspect_ratio,
+            inputs=[input_image, auto_aspect_ratio],
+            outputs=[refine_aspect_ratio, refine_width, refine_height]
         )
         
         # Config management handlers
@@ -1584,10 +1654,11 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
         )
         
         # Refinement config management handlers
-        def save_refine_config_and_refresh(config_name, refine_prompt, refine_negative_prompt, 
+        def save_refine_config_and_refresh(config_name, auto_aspect_ratio, refine_prompt, refine_negative_prompt, 
                                           refine_width, refine_height, refine_steps, 
                                           refine_guidance, refine_seed, refine_shift):
             params = {
+                'auto_aspect_ratio': auto_aspect_ratio,
                 'refine_prompt': refine_prompt,
                 'refine_negative_prompt': refine_negative_prompt,
                 'refine_width': refine_width,
@@ -1604,7 +1675,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
         refine_save_config_btn.click(
             fn=save_refine_config_and_refresh,
             inputs=[
-                refine_config_name_input, refine_prompt, refine_negative_prompt,
+                refine_config_name_input, auto_aspect_ratio, refine_prompt, refine_negative_prompt,
                 refine_width, refine_height, refine_steps, refine_guidance, 
                 refine_seed, refine_shift
             ],
@@ -1615,6 +1686,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
             params, status = app.load_config(config_name)
             if params:
                 return (
+                    params.get('auto_aspect_ratio', True),
                     params.get('refine_prompt', 'High quality, detailed, sharp focus'),
                     params.get('refine_negative_prompt', ''),
                     params.get('refine_width', 2048),
@@ -1626,7 +1698,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
                     status
                 )
             return (
-                gr.update(), gr.update(), gr.update(), gr.update(),
+                gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
                 gr.update(), gr.update(), gr.update(), gr.update(), status
             )
         
@@ -1634,7 +1706,7 @@ def create_interface(auto_load: bool = True, use_distilled: bool = False, device
             fn=load_refine_config,
             inputs=[refine_config_dropdown],
             outputs=[
-                refine_prompt, refine_negative_prompt, refine_width, refine_height,
+                auto_aspect_ratio, refine_prompt, refine_negative_prompt, refine_width, refine_height,
                 refine_steps, refine_guidance, refine_seed, refine_shift, refinement_status
             ]
         )
